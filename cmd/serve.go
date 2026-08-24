@@ -51,7 +51,11 @@ func serveMCP() error {
 		server.WithRecovery(),
 	)
 
-	if err := db.InitDB(); err != nil {
+	// Read-only: this server answers queries and must never write to the
+	// database it is pointed at. On an archive host it runs under a forced
+	// ssh command for remote endpoints, where a schema migration triggered by
+	// a client would be plainly wrong.
+	if err := db.InitReadOnly(); err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 	defer db.CloseDB()
