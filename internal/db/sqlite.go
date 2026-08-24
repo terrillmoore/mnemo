@@ -26,6 +26,25 @@ import (
 
 var db *sql.DB
 
+// Path reports the database file mnemo uses: $MNEMO_DB when set, otherwise
+// ~/.mnemo/mnemo.db.
+//
+// The variable exists so one machine can hold more than one index. An endpoint
+// of a multi-machine archive keeps its own live index at the default path and
+// a read-only copy of the merged archive beside it, and searches either by
+// setting MNEMO_DB. Without it the path is fixed and the second index is
+// unreachable.
+func Path() (string, error) {
+	if p := os.Getenv("MNEMO_DB"); p != "" {
+		return p, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(home, ".mnemo", "mnemo.db"), nil
+}
+
 // GetDB returns the package-level database connection.
 // Must call InitDB first.
 func GetDB() *sql.DB {
@@ -36,16 +55,13 @@ func GetDB() *sql.DB {
 // applies the schema and any pending migrations. Uses WAL mode for
 // concurrent read access.
 func InitDB() error {
-	home, err := os.UserHomeDir()
+	dbPath, err := Path()
 	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
+		return err
 	}
-	mnemoDir := filepath.Join(home, ".mnemo")
-	if err := os.MkdirAll(mnemoDir, 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		return fmt.Errorf("failed to create mnemo directory: %w", err)
 	}
-
-	dbPath := filepath.Join(mnemoDir, "mnemo.db")
 
 	db, err = sql.Open("sqlite", dbPath+"?_synchronous=NORMAL&_journal_mode=WAL&_cache_size=-10000&_temp_store=MEMORY&_busy_timeout=5000")
 	if err != nil {
@@ -397,12 +413,10 @@ func SchemaVersions() (upstream, fork int, name string, err error) {
 // schema DDL. Use this for commands like inject that only need to search and
 // must not block on write locks held by other processes.
 func InitReadOnly() error {
-	home, err := os.UserHomeDir()
+	dbPath, err := Path()
 	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
+		return err
 	}
-
-	dbPath := filepath.Join(home, ".mnemo", "mnemo.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		return fmt.Errorf("database not found: %w", err)
 	}

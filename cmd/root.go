@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Pilan-AI/mnemo/internal/db"
 	"github.com/spf13/cobra"
 )
 
@@ -120,11 +121,10 @@ Your AI coding sessions — indexed, searchable, never forgotten.`,
 		}
 
 		// First run: trigger onboarding if no database exists
-		home, err := os.UserHomeDir()
+		dbPath, err := db.Path()
 		if err != nil {
 			return
 		}
-		dbPath := filepath.Join(home, ".mnemo", "mnemo.db")
 		if !pathExists(dbPath) {
 			runOnboarding()
 		}

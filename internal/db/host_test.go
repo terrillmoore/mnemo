@@ -1,6 +1,7 @@
 package db
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -263,5 +264,48 @@ func TestNewerForkSchemaIsRefused(t *testing.T) {
 	if err == nil {
 		CloseDB()
 		t.Fatal("InitDB accepted a database from a newer fork build; want an error")
+	}
+}
+
+// MNEMO_DB lets one machine hold more than one index: its own live one, and a
+// read-only copy of a multi-machine archive beside it.
+func TestPathHonoursMnemoDB(t *testing.T) {
+	t.Setenv("MNEMO_DB", "/tmp/somewhere/else.db")
+	got, err := Path()
+	if err != nil {
+		t.Fatalf("Path: %v", err)
+	}
+	if got != "/tmp/somewhere/else.db" {
+		t.Errorf("Path = %q, want the MNEMO_DB value", got)
+	}
+}
+
+func TestPathDefaultsUnderHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("MNEMO_DB", "")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	got, err := Path()
+	if err != nil {
+		t.Fatalf("Path: %v", err)
+	}
+	if want := filepath.Join(home, ".mnemo", "mnemo.db"); got != want {
+		t.Errorf("Path = %q, want %q", got, want)
+	}
+}
+
+func TestInitDBUsesMnemoDB(t *testing.T) {
+	dir := t.TempDir()
+	want := filepath.Join(dir, "archive.db")
+	t.Setenv("MNEMO_DB", want)
+
+	if err := InitDB(); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	defer CloseDB()
+
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("InitDB did not create %s: %v", want, err)
 	}
 }
