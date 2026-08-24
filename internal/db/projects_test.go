@@ -98,7 +98,8 @@ func setupTestDB(t *testing.T) func() {
 		end_time DATETIME,
 		total_reasoning_tokens INTEGER DEFAULT 0,
 		agent TEXT DEFAULT '',
-		date TEXT DEFAULT ''
+		date TEXT DEFAULT '',
+		host TEXT NOT NULL DEFAULT ''
 	);
 
 	CREATE TABLE IF NOT EXISTS token_usage (
@@ -136,6 +137,12 @@ func setupTestDB(t *testing.T) func() {
 
 	CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 	CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project);
+	CREATE TABLE IF NOT EXISTS schema_meta (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_sessions_host ON sessions(host);
 	CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
 	CREATE INDEX IF NOT EXISTS idx_sessions_tool ON sessions(tool);
 	CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time);

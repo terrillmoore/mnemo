@@ -46,6 +46,7 @@ var (
 	indexPath        string
 	indexFormat      string
 	indexIncremental bool
+	indexHost        string
 )
 
 var indexCmd = &cobra.Command{
@@ -64,6 +65,9 @@ var indexCmd = &cobra.Command{
 		fmt.Println()
 
 		// Initialize SQLite database
+		if indexHost != "" {
+			db.SetHost(indexHost)
+		}
 		if err := db.InitDB(); err != nil {
 			fmt.Printf("Error initializing database: %v\n", err)
 			return
@@ -362,15 +366,15 @@ func runOnboarding() {
 
 	// Brand colors per tool
 	brandColor := map[string]lipgloss.Style{
-		"Claude Code":       lipgloss.NewStyle().Foreground(lipgloss.Color("#da7756")),
-		"OpenCode":          lipgloss.NewStyle().Foreground(lipgloss.Color("#00dc82")),
-		"Gemini CLI":        lipgloss.NewStyle().Foreground(lipgloss.Color("#4285F4")),
-		"Cursor":            lipgloss.NewStyle().Foreground(lipgloss.Color("#CCCCCC")),
-		"Codex":             lipgloss.NewStyle().Foreground(lipgloss.Color("#10a37f")),
-		"Amp":               lipgloss.NewStyle().Foreground(lipgloss.Color("#F34E3F")),
-		"Kiro":              lipgloss.NewStyle().Foreground(lipgloss.Color("#FF9900")),
-		"Crush":             lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6EC7")),
-		"Antigravity":       lipgloss.NewStyle().Foreground(lipgloss.Color("#8AB4F8")),
+		"Claude Code":        lipgloss.NewStyle().Foreground(lipgloss.Color("#da7756")),
+		"OpenCode":           lipgloss.NewStyle().Foreground(lipgloss.Color("#00dc82")),
+		"Gemini CLI":         lipgloss.NewStyle().Foreground(lipgloss.Color("#4285F4")),
+		"Cursor":             lipgloss.NewStyle().Foreground(lipgloss.Color("#CCCCCC")),
+		"Codex":              lipgloss.NewStyle().Foreground(lipgloss.Color("#10a37f")),
+		"Amp":                lipgloss.NewStyle().Foreground(lipgloss.Color("#F34E3F")),
+		"Kiro":               lipgloss.NewStyle().Foreground(lipgloss.Color("#FF9900")),
+		"Crush":              lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6EC7")),
+		"Antigravity":        lipgloss.NewStyle().Foreground(lipgloss.Color("#8AB4F8")),
 		"VS Code Extensions": lipgloss.NewStyle().Foreground(lipgloss.Color("#007ACC")),
 	}
 
@@ -893,5 +897,6 @@ func init() {
 	indexCmd.Flags().StringVarP(&indexPath, "path", "p", "", "Custom path to index (requires --format)")
 	indexCmd.Flags().StringVar(&indexFormat, "format", "", "Format for custom path: claude, opencode, codex, amp, gemini, cline, kiro, antigravity")
 	indexCmd.Flags().BoolVar(&indexIncremental, "incremental", true, "Skip unchanged sessions (compare file mtime vs indexed_at)")
+	indexCmd.Flags().StringVar(&indexHost, "host", "", "Machine to attribute indexed sessions to (default: this machine's hostname). Set it when indexing another machine's transcripts.")
 	rootCmd.AddCommand(indexCmd)
 }
