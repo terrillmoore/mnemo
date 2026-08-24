@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -134,7 +135,8 @@ func InitDB() error {
 		git_branch TEXT DEFAULT '',
 		working_directory TEXT DEFAULT '',
 		start_time DATETIME,
-		end_time DATETIME
+		end_time DATETIME,
+		host TEXT NOT NULL DEFAULT ''
 	);
 
 	CREATE TABLE IF NOT EXISTS token_usage (
@@ -186,6 +188,11 @@ func InitDB() error {
 
 	CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
 	CREATE INDEX IF NOT EXISTS idx_projects_last_activity ON projects(last_activity);
+
+	CREATE TABLE IF NOT EXISTS schema_meta (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
 	`
 
 	_, err = db.Exec(schema)
@@ -200,47 +207,190 @@ func InitDB() error {
 	return nil
 }
 
-// runMigrations applies schema additions idempotently.
-// Only "duplicate column name" errors are suppressed (column already exists).
-// All other errors (disk full, locked, corruption) are propagated.
-func runMigrations() error {
-	migrations := []string{
-		"ALTER TABLE messages ADD COLUMN model TEXT DEFAULT ''",
-		"ALTER TABLE messages ADD COLUMN provider TEXT DEFAULT ''",
-		"ALTER TABLE messages ADD COLUMN input_tokens INTEGER DEFAULT 0",
-		"ALTER TABLE messages ADD COLUMN output_tokens INTEGER DEFAULT 0",
-		"ALTER TABLE messages ADD COLUMN cache_read_tokens INTEGER DEFAULT 0",
-		"ALTER TABLE messages ADD COLUMN cache_write_tokens INTEGER DEFAULT 0",
-		"ALTER TABLE messages ADD COLUMN cost_usd REAL DEFAULT 0.0",
-		"ALTER TABLE messages ADD COLUMN message_uuid TEXT DEFAULT ''",
-		"ALTER TABLE messages ADD COLUMN parent_uuid TEXT DEFAULT ''",
-		"ALTER TABLE messages ADD COLUMN working_directory TEXT DEFAULT ''",
-		"ALTER TABLE sessions ADD COLUMN provider TEXT DEFAULT ''",
-		"ALTER TABLE sessions ADD COLUMN total_cache_read INTEGER DEFAULT 0",
-		"ALTER TABLE sessions ADD COLUMN total_cache_write INTEGER DEFAULT 0",
-		"ALTER TABLE sessions ADD COLUMN cli_version TEXT DEFAULT ''",
-		"ALTER TABLE sessions ADD COLUMN git_branch TEXT DEFAULT ''",
-		"ALTER TABLE sessions ADD COLUMN working_directory TEXT DEFAULT ''",
-		"ALTER TABLE sessions ADD COLUMN start_time DATETIME",
-		"ALTER TABLE sessions ADD COLUMN end_time DATETIME",
-		"ALTER TABLE token_usage ADD COLUMN cache_read_tokens INTEGER DEFAULT 0",
-		"ALTER TABLE token_usage ADD COLUMN cache_write_tokens INTEGER DEFAULT 0",
-		"ALTER TABLE messages ADD COLUMN reasoning_tokens INTEGER DEFAULT 0",
-		"ALTER TABLE messages ADD COLUMN agent TEXT DEFAULT ''",
-		"ALTER TABLE messages ADD COLUMN date TEXT DEFAULT ''",
-		"ALTER TABLE sessions ADD COLUMN total_reasoning_tokens INTEGER DEFAULT 0",
-		"ALTER TABLE sessions ADD COLUMN agent TEXT DEFAULT ''",
-		"ALTER TABLE sessions ADD COLUMN date TEXT DEFAULT ''",
-	}
+// ForkName identifies this fork in schema_meta, so a database written by a
+// different fork of mnemo is detectable rather than silently misread.
+const ForkName = "terrillmoore/mnemo"
 
-	for _, migration := range migrations {
+// upstreamMigrations is Pilan-AI/mnemo's migration list, kept verbatim and in
+// order. Rebasing onto a newer upstream is then a straight copy of this slice.
+// Never edit or reorder it, and never add to it: fork changes go in
+// forkMigrations.
+var upstreamMigrations = []string{
+	"ALTER TABLE messages ADD COLUMN model TEXT DEFAULT ''",
+	"ALTER TABLE messages ADD COLUMN provider TEXT DEFAULT ''",
+	"ALTER TABLE messages ADD COLUMN input_tokens INTEGER DEFAULT 0",
+	"ALTER TABLE messages ADD COLUMN output_tokens INTEGER DEFAULT 0",
+	"ALTER TABLE messages ADD COLUMN cache_read_tokens INTEGER DEFAULT 0",
+	"ALTER TABLE messages ADD COLUMN cache_write_tokens INTEGER DEFAULT 0",
+	"ALTER TABLE messages ADD COLUMN cost_usd REAL DEFAULT 0.0",
+	"ALTER TABLE messages ADD COLUMN message_uuid TEXT DEFAULT ''",
+	"ALTER TABLE messages ADD COLUMN parent_uuid TEXT DEFAULT ''",
+	"ALTER TABLE messages ADD COLUMN working_directory TEXT DEFAULT ''",
+	"ALTER TABLE sessions ADD COLUMN provider TEXT DEFAULT ''",
+	"ALTER TABLE sessions ADD COLUMN total_cache_read INTEGER DEFAULT 0",
+	"ALTER TABLE sessions ADD COLUMN total_cache_write INTEGER DEFAULT 0",
+	"ALTER TABLE sessions ADD COLUMN cli_version TEXT DEFAULT ''",
+	"ALTER TABLE sessions ADD COLUMN git_branch TEXT DEFAULT ''",
+	"ALTER TABLE sessions ADD COLUMN working_directory TEXT DEFAULT ''",
+	"ALTER TABLE sessions ADD COLUMN start_time DATETIME",
+	"ALTER TABLE sessions ADD COLUMN end_time DATETIME",
+	"ALTER TABLE token_usage ADD COLUMN cache_read_tokens INTEGER DEFAULT 0",
+	"ALTER TABLE token_usage ADD COLUMN cache_write_tokens INTEGER DEFAULT 0",
+	"ALTER TABLE messages ADD COLUMN reasoning_tokens INTEGER DEFAULT 0",
+	"ALTER TABLE messages ADD COLUMN agent TEXT DEFAULT ''",
+	"ALTER TABLE messages ADD COLUMN date TEXT DEFAULT ''",
+	"ALTER TABLE sessions ADD COLUMN total_reasoning_tokens INTEGER DEFAULT 0",
+	"ALTER TABLE sessions ADD COLUMN agent TEXT DEFAULT ''",
+	"ALTER TABLE sessions ADD COLUMN date TEXT DEFAULT ''",
+}
+
+// forkMigrations are this fork's own schema additions, applied after
+// upstream's. Append only: the count of applied entries is recorded in
+// schema_meta as fork_schema, and a database whose fork_schema exceeds
+// len(forkMigrations) was written by a newer build and is refused.
+// The index cannot live in the schema DDL above: on a database that predates
+// the column, CREATE TABLE IF NOT EXISTS is a no-op and the index would be
+// created against a sessions table that has no host yet.
+var forkMigrations = []string{
+	"ALTER TABLE sessions ADD COLUMN host TEXT NOT NULL DEFAULT ''",
+	"CREATE INDEX IF NOT EXISTS idx_sessions_host ON sessions(host)",
+}
+
+// runMigrations applies schema additions idempotently.
+//
+// Upstream's statements run first, unversioned, exactly as upstream runs them:
+// only "duplicate column name" errors are suppressed, and everything else
+// (disk full, locked, corruption) propagates. The fork's statements then run
+// under a version counter in schema_meta.
+//
+// Upstream stamps no version anywhere -- PRAGMA user_version is 0 on every
+// database it has written -- so an old upstream binary can open a
+// fork-upgraded file and write to it. Its inserts name their columns, so rows
+// it writes simply take the default for anything it does not know about. That
+// is why an empty host means "not yet claimed" rather than a valid value, and
+// why `mnemo migrate host` exists to claim such rows later.
+func runMigrations() error {
+	for _, migration := range upstreamMigrations {
 		_, err := db.Exec(migration)
 		if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("migration failed (%s): %w", migration, err)
 		}
 	}
 
+	applied, err := forkSchemaVersion()
+	if err != nil {
+		return err
+	}
+	if applied > len(forkMigrations) {
+		return fmt.Errorf(
+			"database was written by a newer %s build (fork_schema %d, this build understands %d); upgrade mnemo",
+			ForkName, applied, len(forkMigrations))
+	}
+
+	first := applied == 0
+	for _, migration := range forkMigrations[applied:] {
+		_, err := db.Exec(migration)
+		if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("fork migration failed (%s): %w", migration, err)
+		}
+	}
+
+	// The first time this file meets the fork, every existing session predates
+	// the host column. They all came from this machine, so claim them. A
+	// database the fork created is empty at this point and nothing is stamped.
+	if first && len(forkMigrations) > 0 {
+		n, err := ClaimEmptyHosts(Host())
+		if err != nil {
+			return fmt.Errorf("failed to claim existing sessions for host %q: %w", Host(), err)
+		}
+		if n > 0 {
+			log.Printf("mnemo: claimed %d existing session(s) for host %q", n, Host())
+		}
+	}
+
+	if err := setSchemaMeta("fork_name", ForkName); err != nil {
+		return err
+	}
+	if err := setSchemaMetaInt("fork_schema", len(forkMigrations)); err != nil {
+		return err
+	}
+
+	// Advisory only: upstream does not maintain this, we do. A stored value
+	// above our own means some build knew more upstream migrations than we do,
+	// so this fork needs rebasing onto a newer upstream.
+	stored, err := schemaMetaInt("upstream_schema")
+	if err != nil {
+		return err
+	}
+	if stored > len(upstreamMigrations) {
+		log.Printf("mnemo: database records %d upstream migrations but this build knows %d; %s needs rebasing onto a newer upstream",
+			stored, len(upstreamMigrations), ForkName)
+	} else if err := setSchemaMetaInt("upstream_schema", len(upstreamMigrations)); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// schemaMeta reads one schema_meta value. A missing key returns "".
+func schemaMeta(key string) (string, error) {
+	var v string
+	err := db.QueryRow("SELECT value FROM schema_meta WHERE key = ?", key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to read schema_meta %q: %w", key, err)
+	}
+	return v, nil
+}
+
+// schemaMetaInt reads one schema_meta value as an integer. A missing or
+// unparseable value returns 0, so a database predating schema_meta reads as
+// version 0 and every migration runs.
+func schemaMetaInt(key string) (int, error) {
+	v, err := schemaMeta(key)
+	if err != nil || v == "" {
+		return 0, err
+	}
+	n, convErr := strconv.Atoi(v)
+	if convErr != nil {
+		return 0, nil
+	}
+	return n, nil
+}
+
+func setSchemaMeta(key, value string) error {
+	_, err := db.Exec(
+		"INSERT INTO schema_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+		key, value)
+	if err != nil {
+		return fmt.Errorf("failed to write schema_meta %q: %w", key, err)
+	}
+	return nil
+}
+
+func setSchemaMetaInt(key string, value int) error {
+	return setSchemaMeta(key, strconv.Itoa(value))
+}
+
+// forkSchemaVersion reports how many fork migrations this database has had
+// applied.
+func forkSchemaVersion() (int, error) {
+	return schemaMetaInt("fork_schema")
+}
+
+// SchemaVersions reports the upstream and fork migration counts recorded in
+// the database, and the fork that wrote it.
+func SchemaVersions() (upstream, fork int, name string, err error) {
+	if upstream, err = schemaMetaInt("upstream_schema"); err != nil {
+		return
+	}
+	if fork, err = schemaMetaInt("fork_schema"); err != nil {
+		return
+	}
+	name, err = schemaMeta("fork_name")
+	return
 }
 
 // InitReadOnly opens the mnemo database for read-only access without running

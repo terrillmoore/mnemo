@@ -7,8 +7,88 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
+	"sync"
 	"time"
 )
+
+// hostName is the machine every session inserted by this process is attributed
+// to. It defaults to the system hostname, which is right for a workstation
+// indexing its own history. An archive box indexing another machine's
+// transcripts must override it with SetHost, or every imported session will be
+// labelled with the archive's own name.
+var (
+	hostMu   sync.RWMutex
+	hostName = defaultHost()
+)
+
+func defaultHost() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return h
+}
+
+// SetHost sets the host recorded on sessions inserted from now on. Call it
+// before InitDB: the first-run migration claims pre-host-column sessions for
+// whatever host is set at that moment.
+func SetHost(name string) {
+	hostMu.Lock()
+	defer hostMu.Unlock()
+	hostName = name
+}
+
+// Host reports the host that sessions are currently attributed to.
+func Host() string {
+	hostMu.RLock()
+	defer hostMu.RUnlock()
+	return hostName
+}
+
+// ClaimEmptyHosts attributes every session with no host to the named one and
+// reports how many it changed. An empty host means the row was written before
+// the column existed, or by an upstream build that does not know about it;
+// either way the row's origin was never recorded, so claiming it is a
+// statement about where the database has lived, not a correction.
+func ClaimEmptyHosts(name string) (int64, error) {
+	res, err := db.Exec("UPDATE sessions SET host = ? WHERE host = '' OR host IS NULL", name)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// SetAllHosts attributes every session to the named host, overwriting values
+// already there, and reports how many it changed.
+func SetAllHosts(name string) (int64, error) {
+	res, err := db.Exec("UPDATE sessions SET host = ?", name)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// HostCounts reports how many sessions each host holds, commonest first. An
+// empty host name means the sessions have not been claimed.
+func HostCounts() (map[string]int, error) {
+	rows, err := db.Query("SELECT host, COUNT(*) FROM sessions GROUP BY host ORDER BY 2 DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var h string
+		var n int
+		if err := rows.Scan(&h, &n); err != nil {
+			return nil, err
+		}
+		counts[h] = n
+	}
+	return counts, rows.Err()
+}
 
 // Session aggregates all messages from a single AI coding conversation.
 // The ID is typically derived from the source tool's session identifier.
@@ -35,22 +115,30 @@ type Session struct {
 	EndTime              time.Time
 	Agent                string
 	Date                 string
+	// Host is the machine the session happened on. Left empty, the package
+	// default from SetHost is used.
+	Host string
 }
 
 func insertSession(ex execer, sess Session) error {
+	host := sess.Host
+	if host == "" {
+		host = Host()
+	}
 	_, err := ex.Exec(`
 		INSERT OR REPLACE INTO sessions (
 			id, project, first_query, message_count, tool, file_path, indexed_at,
 			model, provider, total_input_tokens, total_output_tokens,
 			total_cache_read, total_cache_write, total_reasoning_tokens, total_cost_usd,
-			cli_version, git_branch, working_directory, start_time, end_time, agent, date
-		) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			cli_version, git_branch, working_directory, start_time, end_time, agent, date,
+			host
+		) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		sess.ID, sess.Project, sess.FirstQuery, sess.MessageCount, sess.Tool, sess.FilePath,
 		sess.Model, sess.Provider, sess.TotalInputTokens, sess.TotalOutputTokens,
 		sess.TotalCacheRead, sess.TotalCacheWrite, sess.TotalReasoningTokens, sess.TotalCostUSD,
 		sess.CLIVersion, sess.GitBranch, sess.WorkingDirectory, sess.StartTime, sess.EndTime,
-		sess.Agent, sess.Date,
+		sess.Agent, sess.Date, host,
 	)
 	return err
 }
@@ -92,9 +180,9 @@ func GetIndexedSessions() (map[string]time.Time, error) {
 
 func insertSessionSimple(ex execer, id, project, firstQuery, filePath, tool string, msgCount int) error {
 	_, err := ex.Exec(`
-		INSERT OR REPLACE INTO sessions (id, project, first_query, message_count, tool, file_path, indexed_at)
-		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-	`, id, project, firstQuery, msgCount, tool, filePath)
+		INSERT OR REPLACE INTO sessions (id, project, first_query, message_count, tool, file_path, indexed_at, host)
+		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+	`, id, project, firstQuery, msgCount, tool, filePath, Host())
 	return err
 }
 
