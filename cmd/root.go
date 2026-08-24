@@ -114,9 +114,18 @@ Index your past to build your future.
 
 Your AI coding sessions — indexed, searchable, never forgotten.`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		// Skip onboarding for commands that don't need it
+		// Skip onboarding for commands that don't need it.
+		//
+		// serve and migrate are here because neither may create a database.
+		// serve is an MCP server, run non-interactively and, on an archive
+		// host, under a forced ssh command: onboarding there would scan the
+		// host for AI tools and index whatever it found, on behalf of a remote
+		// client, as a service account. migrate reports on and repairs an
+		// existing database; conjuring an empty one hides the fact that the
+		// database you meant is not there.
 		name := cmd.Name()
-		if name == "onboarding" || name == "version" || name == "help" || name == "completion" || name == "status" || name == "inject" {
+		switch name {
+		case "onboarding", "version", "help", "completion", "status", "inject", "serve", "migrate", "host":
 			return
 		}
 
