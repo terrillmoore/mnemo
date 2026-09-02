@@ -252,3 +252,43 @@ func TestSpilledResultPath(t *testing.T) {
 		}
 	}
 }
+
+// A pasted PDF arrives as an attachment record of tens of megabytes on one
+// line. Records after it must still be indexed.
+func TestParseClaudeSessionLongLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "long.jsonl")
+	big := strings.Repeat("A", 11*1024*1024)
+	lines := []string{
+		`{"type":"user","uuid":"u1","timestamp":"2026-09-02T20:54:00.000Z","message":{"role":"user","content":"before"}}`,
+		`{"type":"attachment","uuid":"x1","attachment":{"type":"file","content":{"type":"pdf","base64":"` + big + `"}}}`,
+		`{"type":"user","uuid":"u2","timestamp":"2026-09-02T20:54:01.000Z","message":{"role":"user","content":"after"}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := parseClaudeSession(path, "claude")
+	if err != nil {
+		t.Fatalf("parseClaudeSession: %v", err)
+	}
+	if got := roles(s); strings.Join(got, ",") != "user,user" {
+		t.Fatalf("roles = %v, want both user records", got)
+	}
+	if s.Messages[1].Content != "after" {
+		t.Errorf("second row = %q, want the record after the long line", s.Messages[1].Content)
+	}
+}
+
+// A final line without a newline is still a record.
+func TestParseClaudeSessionNoTrailingNewline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nonl.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"user","uuid":"u1","message":{"role":"user","content":"tail"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := parseClaudeSession(path, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Messages) != 1 || s.Messages[0].Content != "tail" {
+		t.Errorf("messages = %+v", s.Messages)
+	}
+}

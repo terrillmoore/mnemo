@@ -7,6 +7,7 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"os"
@@ -92,10 +93,10 @@ type claudeSession struct {
 func indexJSONLSession(path, tool string) (int, int) {
 	s, err := parseClaudeSession(path, tool)
 	if err != nil {
+		// A read error part way through still leaves the records before it.
 		indexErrors++
-		return 0, 0
 	}
-	if len(s.Messages) == 0 {
+	if s == nil || len(s.Messages) == 0 {
 		return 0, 0
 	}
 
@@ -151,7 +152,9 @@ func indexJSONLSession(path, tool string) (int, int) {
 }
 
 // parseClaudeSession reads one JSONL transcript and returns its session
-// fields and messages. It touches no database.
+// fields and messages. It touches no database. On a read error part way
+// through the file it returns both the records parsed so far and the
+// error; the session is nil only when the file cannot be opened.
 //
 // Each user or assistant record yields one row per content block: text
 // blocks are joined into a single row with the message's role, and each
@@ -172,23 +175,18 @@ func parseClaudeSession(path, tool string) (*claudeSession, error) {
 	}
 	s.ParentID = subagentParent(path, s.ID)
 
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // Up to 10MB per line
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
+	// Lines are read without a length cap: an attachment record holding a
+	// pasted PDF can run to tens of megabytes, and a cap would end the
+	// session there.
+	handle := func(line []byte) {
 		var entry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
+		if err := json.Unmarshal(line, &entry); err != nil {
+			return
 		}
 
 		entryType, _ := entry["type"].(string)
 		if entryType != "user" && entryType != "assistant" {
-			continue
+			return
 		}
 
 		uuid, _ := entry["uuid"].(string)
@@ -256,7 +254,7 @@ func parseClaudeSession(path, tool string) (*claudeSession, error) {
 		}
 
 		if len(rows) == 0 {
-			continue
+			return
 		}
 
 		s.InputTokens += inputTokens
@@ -290,8 +288,20 @@ func parseClaudeSession(path, tool string) (*claudeSession, error) {
 		s.Messages = append(s.Messages, rows...)
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	reader := bufio.NewReaderSize(file, 1024*1024)
+	var readErr error
+	for {
+		line, err := reader.ReadBytes('\n')
+		if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
+			handle(trimmed)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			readErr = err
+			break
+		}
 	}
 	// A subagent's rows learn the parent only once a record has named it, so
 	// fill in any rows that came before.
@@ -300,7 +310,7 @@ func parseClaudeSession(path, tool string) (*claudeSession, error) {
 			s.Messages[i].Agent = s.ParentID
 		}
 	}
-	return s, nil
+	return s, readErr
 }
 
 // contentRows turns a message's content field into rows. Text blocks merge
