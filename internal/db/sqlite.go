@@ -65,8 +65,20 @@ func InitDB() error {
 
 	db, err = sql.Open("sqlite", dbPath+"?_synchronous=NORMAL&_journal_mode=WAL&_cache_size=-10000&_temp_store=MEMORY&_busy_timeout=5000")
 	if err != nil {
+		db = nil
 		return fmt.Errorf("failed to open database: %w", err)
 	}
+	// Every failure from here on must release the handle. Callers do not call
+	// CloseDB after an InitDB error, and an open handle keeps the file busy:
+	// on Windows that blocks deleting it, which is how a refused database
+	// broke the test suite's temporary-directory cleanup.
+	opened := false
+	defer func() {
+		if !opened {
+			_ = db.Close()
+			db = nil
+		}
+	}()
 
 	// SQLite is single-writer; limit connections to prevent "database is locked" errors
 	db.SetMaxOpenConns(1)
@@ -220,6 +232,7 @@ func InitDB() error {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 
+	opened = true
 	return nil
 }
 
@@ -423,12 +436,15 @@ func InitReadOnly() error {
 
 	db, err = sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(2000)&_pragma=cache_size(-10000)&_pragma=temp_store(MEMORY)")
 	if err != nil {
+		db = nil
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 
 	db.SetMaxOpenConns(1)
 
 	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		db = nil
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 
@@ -441,6 +457,7 @@ func CloseDB() {
 		if err := db.Close(); err != nil {
 			log.Printf("warning: failed to close database cleanly: %v", err)
 		}
+		db = nil
 	}
 }
 
