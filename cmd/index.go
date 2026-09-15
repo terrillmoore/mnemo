@@ -113,7 +113,7 @@ var indexCmd = &cobra.Command{
 			fmt.Printf("Indexing custom path: %s (format: %s)\n", expandedPath, indexFormat)
 			sessions, messages := indexCustomPath(expandedPath, indexFormat)
 			fmt.Printf("  ✓ Custom (%s): %d sessions, %d messages\n", indexFormat, sessions, messages)
-			fmt.Printf("\nIndex saved to: ~/.mnemo/mnemo.db\n")
+			fmt.Printf("\nIndex saved to: %s\n", indexPathForDisplay())
 			return
 		}
 
@@ -294,7 +294,7 @@ var indexCmd = &cobra.Command{
 		if indexErrors > 0 {
 			fmt.Printf("  (Skipped %d messages due to errors)\n", indexErrors)
 		}
-		fmt.Printf("Index saved to: ~/.mnemo/mnemo.db\n")
+		fmt.Printf("Index saved to: %s\n", indexPathForDisplay())
 
 		if err := populateProjectsFromSessions(); err != nil {
 			fmt.Printf("  (Warning: could not populate projects: %v)\n", err)
@@ -899,4 +899,15 @@ func init() {
 	indexCmd.Flags().BoolVar(&indexIncremental, "incremental", true, "Skip unchanged sessions (compare file mtime vs indexed_at)")
 	indexCmd.Flags().StringVar(&indexHost, "host", "", "Machine to attribute indexed sessions to (default: this machine's hostname). Set it when indexing another machine's transcripts.")
 	rootCmd.AddCommand(indexCmd)
+}
+
+// indexPathForDisplay names the database file the index went to. It is the
+// path db.Path reports, so an index written under MNEMO_DB says so rather than
+// naming the default.
+func indexPathForDisplay() string {
+	p, err := db.Path()
+	if err != nil {
+		return "(unknown)"
+	}
+	return p
 }
