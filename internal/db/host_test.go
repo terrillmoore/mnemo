@@ -265,6 +265,12 @@ func TestNewerForkSchemaIsRefused(t *testing.T) {
 		CloseDB()
 		t.Fatal("InitDB accepted a database from a newer fork build; want an error")
 	}
+	// A refused open must not leave the handle behind. Nobody calls CloseDB
+	// after an InitDB error, and on Windows the open file blocks the
+	// temporary directory's cleanup, which fails the test there.
+	if db != nil {
+		t.Error("InitDB returned an error but left the database handle open")
+	}
 }
 
 // MNEMO_DB lets one machine hold more than one index: its own live one, and a
