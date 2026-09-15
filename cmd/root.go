@@ -114,18 +114,7 @@ Index your past to build your future.
 
 Your AI coding sessions — indexed, searchable, never forgotten.`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		// Skip onboarding for commands that don't need it.
-		//
-		// serve and migrate are here because neither may create a database.
-		// serve is an MCP server, run non-interactively and, on an archive
-		// host, under a forced ssh command: onboarding there would scan the
-		// host for AI tools and index whatever it found, on behalf of a remote
-		// client, as a service account. migrate reports on and repairs an
-		// existing database; conjuring an empty one hides the fact that the
-		// database you meant is not there.
-		name := cmd.Name()
-		switch name {
-		case "onboarding", "version", "help", "completion", "status", "inject", "serve", "migrate", "host":
+		if skipOnboarding(cmd) {
 			return
 		}
 
@@ -138,6 +127,35 @@ Your AI coding sessions — indexed, searchable, never forgotten.`,
 			runOnboarding()
 		}
 	},
+}
+
+// skipOnboarding reports whether cmd must run without the first-run
+// onboarding, even when no database exists.
+//
+// Onboarding is an index run with a banner and a one-month cutoff, so the
+// commands below never want it:
+//
+//   - index is the indexer itself. Onboarding ahead of it set indexCutoff to
+//     one month, so the first index run on a fresh database (an archive
+//     host's, say) silently skipped every older session.
+//   - serve and migrate may not create a database. serve is an MCP server,
+//     run non-interactively and, on an archive host, under a forced ssh
+//     command: onboarding there would scan the host for AI tools and index
+//     whatever it found, on behalf of a remote client, as a service account.
+//     migrate reports on and repairs an existing database; conjuring an empty
+//     one hides the fact that the database you meant is not there.
+//
+// A --non-interactive run skips onboarding too: nobody is watching the
+// banner, and a scripted caller that wants an index asks for one.
+func skipOnboarding(cmd *cobra.Command) bool {
+	switch cmd.Name() {
+	case "onboarding", "version", "help", "completion", "status", "inject", "serve", "migrate", "host", "index":
+		return true
+	}
+	if flag, err := cmd.Flags().GetBool("non-interactive"); err == nil && flag {
+		return true
+	}
+	return false
 }
 
 func Execute() {
