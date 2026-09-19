@@ -1,0 +1,144 @@
+# Copyright (c) 2026 MCCI Corporation. All rights reserved.
+#
+# Build, test and publish mnemo. gitlab-x is authoritative for this fork;
+# github.com/terrillmoore/mnemo is kept current by the mirror job below and
+# is where anything bound for upstream goes out.
+#
+# The archive host installs what `publish` uploads, so publishing is the act
+# that changes a machine, and it is a button rather than a consequence of
+# merging.
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+    - when: never
+
+stages:
+  - check
+  - build
+  - publish
+  - mirror
+
+variables:
+  # Matched to go.mod's `go 1.23.0`, one version ahead as well, the same
+  # pair the GitHub workflow runs.
+  GO_IMAGE: "golang:1.24"
+  # Where a published build lands: the project's generic package registry,
+  # which the claude-archive Ansible role reads with a read-only deploy
+  # token. Nothing in CI reaches the archive itself.
+  PACKAGE_NAME: "mnemo"
+
+.go:
+  image: "${GO_IMAGE}"
+  tags:
+    - ubuntu
+    - tools-build
+  variables:
+    GOPATH: "${CI_PROJECT_DIR}/.go"
+    GOCACHE: "${CI_PROJECT_DIR}/.gocache"
+    # `git describe` in the build job needs the history and the tags, and
+    # the fork records its version from build info rather than -ldflags.
+    GIT_DEPTH: "0"
+  cache:
+    key:
+      files:
+        - go.sum
+    paths:
+      - .go/pkg/mod
+      - .gocache
+
+vet:
+  extends: .go
+  stage: check
+  script:
+    - gofmt -l cmd internal main.go | tee /tmp/unformatted
+    - test ! -s /tmp/unformatted || { echo "gofmt would change the files above"; exit 1; }
+    - go vet ./...
+
+test:
+  extends: .go
+  stage: check
+  script:
+    # -race because serve_handlers_test.go builds an MCP server in-process.
+    - go test -race ./...
+
+# One binary, for the archive host and every Linux machine here. Darwin and
+# Windows builds belong to a release, not to this pipeline, and nothing here
+# needs them yet.
+build:linux-amd64:
+  extends: .go
+  stage: build
+  script:
+    - VERSION="$(git describe --tags --always --dirty)"
+    - echo "VERSION=$VERSION" | tee build.env
+    - GOOS=linux GOARCH=amd64 go build -trimpath -o mnemo .
+    - ./mnemo version
+    - sha256sum mnemo | tee mnemo.sha256
+  artifacts:
+    paths:
+      - mnemo
+      - mnemo.sha256
+    reports:
+      dotenv: build.env
+    expire_in: 30 days
+
+# Manual, and the only way a new binary becomes available to the archive.
+# The version is what `git describe` said at build time, so a package
+# uploaded from a tagged commit is named for the tag and one from main
+# carries the commit it came from.
+publish:
+  extends: .go
+  stage: publish
+  needs:
+    - job: build:linux-amd64
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: manual
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+    - when: never
+  # Two publishes of the same version would race to overwrite each other.
+  resource_group: publish
+  interruptible: false
+  script:
+    - test -n "$VERSION" || { echo "VERSION is empty; build:linux-amd64 did not pass its dotenv"; exit 1; }
+    - URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${PACKAGE_NAME}/${VERSION}"
+    - 'curl --fail-with-body --silent --show-error --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file mnemo "${URL}/mnemo-linux-amd64"'
+    - 'curl --fail-with-body --silent --show-error --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file mnemo.sha256 "${URL}/mnemo-linux-amd64.sha256"'
+    - echo "Published ${PACKAGE_NAME} ${VERSION}; set claude_archive_mnemo_version to it."
+
+# github.com/terrillmoore/mnemo is the public copy and the route to upstream,
+# so it follows this repository rather than leading it. The key is a
+# protected CI variable, so this runs on the default branch and on tags and
+# nowhere else.
+mirror:github:
+  stage: mirror
+  image: "${GO_IMAGE}"
+  tags:
+    - ubuntu
+    - tools-build
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+    - when: never
+  variables:
+    GIT_STRATEGY: clone
+    GIT_DEPTH: "0"
+  resource_group: mirror
+  before_script:
+    - test -n "$GITHUB_MIRROR_SSH_KEY_B64" || { echo "GITHUB_MIRROR_SSH_KEY_B64 is not set (protected CI variable; the default branch and tags only)"; exit 1; }
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - echo "$GITHUB_MIRROR_SSH_KEY_B64" | base64 -d > ~/.ssh/github && chmod 600 ~/.ssh/github
+    - cp keys/ssh_known_hosts ~/.ssh/known_hosts
+  script:
+    - export GIT_SSH_COMMAND="ssh -i ~/.ssh/github -o BatchMode=yes -o StrictHostKeyChecking=yes"
+    - git remote add github git@github.com:terrillmoore/mnemo.git
+    # Fast-forward only: if GitHub has something this repository does not,
+    # someone committed in the wrong place and that is worth a failed job
+    # rather than a silent overwrite.
+    - git push github "HEAD:refs/heads/${CI_DEFAULT_BRANCH}" --follow-tags

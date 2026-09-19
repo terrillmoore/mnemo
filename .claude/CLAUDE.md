@@ -1,24 +1,37 @@
 # mnemo — notes for Claude Code sessions
 
-## Release checklist (CRITICAL — do not skip)
+## Where this repository lives
 
-When the user asks to "cut a release", "tag a version", or merges a version bump:
+`mcci/tools/claude/mnemo` on gitlab-x is authoritative. Work happens here:
+branches, merge requests, pipelines, and the package registry the archive
+host installs from. `github.com/terrillmoore/mnemo` is the public copy, kept
+current by the `mirror:github` job on every push to `main` and on tags, and it
+is the route for anything bound upstream to `Pilan-AI/mnemo`. Never commit to
+the GitHub copy: the mirror push is fast-forward only and a commit there stops
+the job rather than being merged quietly.
 
-1. Ensure `CHANGELOG.md` has an entry for the new version.
-2. Tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. **Verify the `Bump Homebrew Formula` workflow ran.** It lives in
-   `.github/workflows/release.yml` and requires the `HOMEBREW_TAP_PAT` repo
-   secret. It opens a PR on `Pilan-AI/homebrew-tap`.
-4. Review and merge the tap PR. Until it's merged, `brew upgrade mnemo` stays
-   on the old version.
-5. Optionally: `gh release create vX.Y.Z --generate-notes`.
+Remotes on a working clone: `origin` gitlab-x, `github` the public copy,
+`upstream` Pilan-AI.
 
-If the workflow didn't fire or failed, fall back to the manual instructions in
-[`RELEASING.md`](../RELEASING.md).
+## Shipping a build
 
-**History of this bug:** `Pilan-AI/mnemo#8` — the tap drifted from v1.0.0 to
-v1.3.4 (7 releases) because releases were tagged without bumping the formula.
-Shipping a tag is not shipping a release; the formula bump is the last mile.
+`mnemo` is not installed from a release or a tap. The archive host installs
+what the pipeline publishes, so publishing is the act that changes a machine.
+
+1. Merge to `main`. `vet`, `test` and `build:linux-amd64` run on every
+   pipeline; nothing is published by merging.
+2. Run the `publish` job by hand. It uploads the linux/amd64 binary and its
+   sha256 to the project's generic package registry, named for what
+   `git describe` said: a tag if the pipeline ran on one, otherwise the
+   commit.
+3. Put that version into `claude_archive_mnemo_version` in
+   `mcci/sysadmin/infrastructure`, in an MR that says why, and run the play.
+   The role downloads from the registry with a read-only deploy token and
+   checks the sha256. Nothing in CI reaches the archive.
+
+Upstream's Homebrew tap and its GoReleaser workflow belong to
+`Pilan-AI/mnemo` and are not part of this path. `RELEASING.md` and
+`.github/workflows/release.yml` describe that flow, not ours.
 
 ## Multi-machine archive
 
