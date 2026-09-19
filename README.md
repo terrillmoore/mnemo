@@ -107,7 +107,7 @@ mnemo install
 
 This configures your MCP client to launch mnemo automatically. Restart the client after installing. The MCP server exposes four tools: `mnemo_search`, `mnemo_context`, `mnemo_recent`, `mnemo_tools`.
 
-Search results delivered through MCP use the same session-grouped ranking as the CLI but formatted for minimal token usage — your AI assistant gets maximum context in minimum space.
+Search results delivered through MCP use the same session-grouped ranking as the CLI, and every tool answers in JSON: the reply goes in `structuredContent`, the same JSON goes in the text block for a client that reads only text, and each tool publishes its `outputSchema` at `tools/list`. A model reads these replies and never reports a parse error, so the fields are named rather than packed into a line, and a value the database does not record is `null` rather than a substitute.
 
 ## Several machines, one history (this fork)
 
@@ -276,7 +276,7 @@ graph TD
 1. `mnemo index` scans each tool's native storage (JSONL, SQLite, JSON)
 2. Messages are normalized into `~/.mnemo/mnemo.db` — a single SQLite file with FTS5 full-text search
 3. `mnemo search` groups results by session and ranks them using BM25 relevance, recency weighting, match density, and role preference
-4. Results adapt to the consumer — compact cards for humans, token-efficient summaries for AI context, full JSON for programmatic access
+4. Results adapt to the consumer — compact cards for a person at a terminal, JSON with a published schema for anything that reads them as data, including a model working through MCP
 
 The database is a single file. Back it up, move it between machines, query it with any SQLite client.
 
