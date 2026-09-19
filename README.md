@@ -109,6 +109,43 @@ This configures your MCP client to launch mnemo automatically. Restart the clien
 
 Search results delivered through MCP use the same session-grouped ranking as the CLI but formatted for minimal token usage — your AI assistant gets maximum context in minimum space.
 
+## Several machines, one history (this fork)
+
+`terrillmoore/mnemo` adds what it takes to keep one searchable history across
+several machines. Upstream indexes the machine it runs on; this fork can tell
+one machine's sessions from another's and can answer queries for a machine that
+holds no copy of the data.
+
+- `sessions.host` records the machine a session came from. `mnemo index --host
+  NAME` sets it; it defaults to the system hostname. Without it a merged index
+  cannot tell two machines apart, because `working_directory` is the same when
+  both hold `/home/you/project`.
+- `MNEMO_DB` picks the database file, so a machine can keep its own live index
+  and a copy of the merged one side by side.
+- `mnemo serve` opens the database read-only, which makes it safe to run under
+  an ssh forced command: a client cannot trigger a schema migration on someone
+  else's index.
+- `mnemo migrate host` claims rows written before the column existed, and
+  `mnemo migrate status` reports per-host counts.
+
+The arrangement these support: every machine pushes its transcripts to one
+archive host, the archive indexes them with `--host`, and a machine that needs
+to search everything runs `mnemo serve` **on the archive** through ssh and
+registers it as an MCP server. Queries run where the data is and only results
+cross the wire, so a shared machine can search the whole history without
+holding any of it. A machine that should hold a full copy can fetch the index
+instead and search it locally through `MNEMO_DB`.
+
+The pieces above are in the binary. The deployment around them is not, and
+there is no central skill or installer here that anyone can use unmodified:
+each person sets up their own databases, keys, transfer scripts, and the skill
+that tells an agent which of them this machine can reach. Terry Moore's setup
+is one worked example, installed from his `personal-claude-context` repo, which
+carries the push and pull scripts, the systemd timers, and a `mnemo` skill
+whose first section says whether the machine it is installed on can reach the
+archive and how. That repo is private; the shape is described here so it can be
+rebuilt rather than copied.
+
 ## Commands
 
 | Command | What it does |

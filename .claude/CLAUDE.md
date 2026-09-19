@@ -20,6 +20,25 @@ If the workflow didn't fire or failed, fall back to the manual instructions in
 v1.3.4 (7 releases) because releases were tagged without bumping the formula.
 Shipping a tag is not shipping a release; the formula bump is the last mile.
 
+## Multi-machine archive
+
+This fork exists mainly to support one searchable history across several
+machines: the `host` column, `--host` at index time, `MNEMO_DB`, `mnemo serve`
+opening the database read-only under an ssh forced command, and `mnemo
+migrate host`. README.md, "Several machines, one history", describes the shape.
+
+Nothing here configures a deployment, and no skill in this repo can be
+installed unmodified. Each person builds their own: databases, keys, transfer
+scripts, and a skill that tells an agent what the machine it is running on can
+reach. Terry's is installed from his private `personal-claude-context` repo.
+
+If you are an agent on one of Terry's machines and need history from another
+machine, read the installed skill at `~/.claude/skills/mnemo/SKILL.md` first.
+Its opening section says whether this machine can reach the archive, and how.
+Do not assume it can: a machine with a push key only can write to the archive
+and cannot read it back, by design, and no amount of local searching will find
+another machine's sessions.
+
 ## Other context
 
 - Module path: `github.com/0xRaghu/mnemo` (note the `0xRaghu`, not `Pilan-AI`).
