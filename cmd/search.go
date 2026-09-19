@@ -102,9 +102,7 @@ func printHumanFormat(query string, results []db.SessionMatch, startTime time.Ti
 		if title == "" {
 			title = r.Project
 		}
-		if len(title) > 80 {
-			title = title[:77] + "..."
-		}
+		title = truncate(title, 77)
 
 		// Relative time
 		ago := relativeTime(r.StartTime)
@@ -152,9 +150,7 @@ func printContextFormat(query string, results []db.SessionMatch) {
 		if title == "" {
 			title = r.Project
 		}
-		if len(title) > 100 {
-			title = title[:97] + "..."
-		}
+		title = truncate(title, 97)
 
 		fmt.Printf("%d. [%s/%s/%dhits] \"%s\" — %s\n",
 			i+1, r.Project, ago, r.MatchCount, title, r.Tool)

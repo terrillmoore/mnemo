@@ -33,16 +33,19 @@ type SessionMatch struct {
 	FirstQuery   string
 	MessageCount int
 	Tool         string
-	// Host is the machine the session was indexed on, empty for a row
-	// written before the column existed. One archive holds several
-	// machines' history, so a result that omits it is ambiguous there.
-	Host        string
-	StartTime   time.Time
-	MatchCount  int
-	BestRank    float64
-	FinalScore  float64
-	Snippet     string
-	SnippetRole string
+	// Host is the machine the session was indexed on. It is empty for a row
+	// written before the column existed; the machine is unknown, not local.
+	Host string
+	// WorkingDirectory is the directory the session ran in. It identifies
+	// the work more reliably than Project, which several adapters derive
+	// with a heuristic.
+	WorkingDirectory string
+	StartTime        time.Time
+	MatchCount       int
+	BestRank         float64
+	FinalScore       float64
+	Snippet          string
+	SnippetRole      string
 }
 
 // sessionsRecordHost reports whether the sessions table has a host column.
@@ -221,7 +224,8 @@ func SearchGrouped(query string, limit int) ([]SessionMatch, error) {
 	}
 	metaQuery := fmt.Sprintf(`
 		SELECT project, COALESCE(first_query, ''), message_count, tool,
-			   %s, COALESCE(start_time, indexed_at, '')
+			   %s, COALESCE(working_directory, ''),
+			   COALESCE(start_time, indexed_at, '')
 		FROM sessions WHERE id = ?
 	`, hostExpr)
 
@@ -240,7 +244,8 @@ func SearchGrouped(query string, limit int) ([]SessionMatch, error) {
 		// Fetch session metadata (scan time as string due to mixed timestamp formats)
 		var timeStr string
 		err := db.QueryRow(metaQuery, sid).
-			Scan(&sm.Project, &sm.FirstQuery, &sm.MessageCount, &sm.Tool, &sm.Host, &timeStr)
+			Scan(&sm.Project, &sm.FirstQuery, &sm.MessageCount, &sm.Tool, &sm.Host,
+				&sm.WorkingDirectory, &timeStr)
 		if err != nil {
 			continue
 		}
