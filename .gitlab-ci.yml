@@ -108,8 +108,8 @@ publish:
   script:
     - test -n "$VERSION" || { echo "VERSION is empty; build:linux-amd64 did not pass its dotenv"; exit 1; }
     - URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${PACKAGE_NAME}/${VERSION}"
-    - curl --fail-with-body --silent --show-error --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file mnemo "${URL}/mnemo-linux-amd64"
-    - curl --fail-with-body --silent --show-error --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file mnemo.sha256 "${URL}/mnemo-linux-amd64.sha256"
+    - 'curl --fail-with-body --silent --show-error --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file mnemo "${URL}/mnemo-linux-amd64"'
+    - 'curl --fail-with-body --silent --show-error --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file mnemo.sha256 "${URL}/mnemo-linux-amd64.sha256"'
     - echo "Published ${PACKAGE_NAME} ${VERSION}; set claude_archive_mnemo_version to it."
 
 # github.com/terrillmoore/mnemo is the public copy and the route to upstream,
