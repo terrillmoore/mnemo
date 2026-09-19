@@ -44,9 +44,9 @@ func TestSanitizeFTS5Query(t *testing.T) {
 
 func TestParseFlexibleTime(t *testing.T) {
 	tests := []struct {
-		name    string
-		input   string
-		wantUTC bool
+		name     string
+		input    string
+		wantUTC  bool
 		wantZero bool
 	}{
 		{name: "empty string", input: "", wantZero: true},
@@ -297,5 +297,66 @@ func TestSearchGroupedEmptyQuery(t *testing.T) {
 	_, err := SearchGrouped("***", 5)
 	if err == nil {
 		t.Error("SearchGrouped with empty-after-sanitize query should error")
+	}
+}
+
+// A database written only by upstream mnemo has no host column, and a
+// read-only caller such as the MCP server cannot add one. Search must still
+// answer, leaving the machine blank, rather than reporting that nothing
+// matched.
+func TestSearchGroupedWithoutHostColumn(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	_ = InsertSession(Session{
+		ID: "sess-1", Project: "proj-a", FirstQuery: "auth question",
+		MessageCount: 2, Tool: "claude", StartTime: time.Now().Add(-1 * time.Hour),
+	})
+	_ = InsertMessage(Message{SessionID: "sess-1", Project: "proj-a", Role: "user", Content: "How to implement authentication?"})
+	_ = InsertMessage(Message{SessionID: "sess-1", Project: "proj-a", Role: "assistant", Content: "Use JWT for authentication."})
+
+	if _, err := db.Exec("DROP INDEX IF EXISTS idx_sessions_host"); err != nil {
+		t.Fatalf("dropping the host index: %v", err)
+	}
+	if _, err := db.Exec("ALTER TABLE sessions DROP COLUMN host"); err != nil {
+		t.Fatalf("dropping the host column: %v", err)
+	}
+
+	results, err := SearchGrouped("authentication", 5)
+	if err != nil {
+		t.Fatalf("SearchGrouped() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 session result, got %d", len(results))
+	}
+	if results[0].Host != "" {
+		t.Errorf("Host = %q, want empty for a database that records none", results[0].Host)
+	}
+}
+
+// The same query against a database that does record the host names it.
+func TestSearchGroupedReportsTheHost(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	saved := Host()
+	defer SetHost(saved)
+	SetHost("apollo")
+
+	_ = InsertSession(Session{
+		ID: "sess-1", Project: "proj-a", FirstQuery: "auth question",
+		MessageCount: 2, Tool: "claude", StartTime: time.Now().Add(-1 * time.Hour),
+	})
+	_ = InsertMessage(Message{SessionID: "sess-1", Project: "proj-a", Role: "user", Content: "How to implement authentication?"})
+
+	results, err := SearchGrouped("authentication", 5)
+	if err != nil {
+		t.Fatalf("SearchGrouped() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 session result, got %d", len(results))
+	}
+	if results[0].Host != "apollo" {
+		t.Errorf("Host = %q, want %q", results[0].Host, "apollo")
 	}
 }
