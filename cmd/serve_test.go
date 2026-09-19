@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/Pilan-AI/mnemo/internal/db"
 )
 
 func TestShorten(t *testing.T) {
@@ -57,5 +60,60 @@ func TestFormatRelativeShortFarPast(t *testing.T) {
 	got := formatRelativeShort(old)
 	if got == "?" || got == "" {
 		t.Error("formatRelativeShort for 60 days ago should not be empty/unknown")
+	}
+}
+
+func TestFormatSessionLineNamesTheHost(t *testing.T) {
+	r := db.SessionMatch{
+		Project:    "lora-bootloader",
+		FirstQuery: "why does the second stage hang",
+		Tool:       "claude",
+		Host:       "tmmnote15",
+		StartTime:  time.Now().Add(-3 * 24 * time.Hour),
+		MatchCount: 4,
+	}
+
+	got := formatSessionLine(1, r)
+	want := "1. [tmmnote15:lora-bootloader/3d/4hits] \"why does the second stage hang\" — claude\n"
+	if got != want {
+		t.Errorf("formatSessionLine() = %q, want %q", got, want)
+	}
+}
+
+// A row indexed before the host column existed records no machine. Saying so
+// by leaving the field out beats naming the machine that ran the query, which
+// is wrong whenever the answer matters.
+func TestFormatSessionLineOmitsAnUnknownHost(t *testing.T) {
+	r := db.SessionMatch{
+		Project:    "lora-bootloader",
+		FirstQuery: "why does the second stage hang",
+		Tool:       "claude",
+		StartTime:  time.Now().Add(-3 * 24 * time.Hour),
+		MatchCount: 4,
+	}
+
+	got := formatSessionLine(1, r)
+	if strings.Contains(got, ":") {
+		t.Errorf("formatSessionLine() = %q, should carry no host separator", got)
+	}
+	want := "1. [lora-bootloader/3d/4hits] \"why does the second stage hang\" — claude\n"
+	if got != want {
+		t.Errorf("formatSessionLine() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatSessionLineFallsBackToTheProject(t *testing.T) {
+	r := db.SessionMatch{
+		Project:    "lora-bootloader",
+		Tool:       "claude",
+		Host:       "mercury2-emb-ah3",
+		StartTime:  time.Now().Add(-2 * time.Hour),
+		MatchCount: 1,
+	}
+
+	got := formatSessionLine(2, r)
+	want := "2. [mercury2-emb-ah3:lora-bootloader/2h/1hits] \"lora-bootloader\" — claude\n"
+	if got != want {
+		t.Errorf("formatSessionLine() = %q, want %q", got, want)
 	}
 }

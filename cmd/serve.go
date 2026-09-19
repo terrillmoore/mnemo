@@ -43,6 +43,30 @@ func init() {
 // serveMCP starts an MCP (Model Context Protocol) server over stdio, exposing
 // mnemo's search, context, recent, and tools capabilities to MCP clients like
 // Claude Desktop and Claude Code.
+// formatSessionLine renders one search hit for an MCP client. The machine
+// comes before the project, because this server usually answers for an
+// archive holding several machines' history and "which machine" decides
+// where the caller can read the transcript. A row indexed before the host
+// column existed has none, and the field is left out rather than guessed.
+func formatSessionLine(n int, r db.SessionMatch) string {
+	ago := formatRelativeShort(r.StartTime)
+	title := r.FirstQuery
+	if title == "" {
+		title = r.Project
+	}
+	if len(title) > 100 {
+		title = title[:97] + "..."
+	}
+
+	where := r.Project
+	if r.Host != "" {
+		where = r.Host + ":" + r.Project
+	}
+
+	return fmt.Sprintf("%d. [%s/%s/%dhits] \"%s\" — %s\n",
+		n, where, ago, r.MatchCount, title, r.Tool)
+}
+
 func serveMCP() error {
 	s := server.NewMCPServer(
 		"mnemo",
@@ -117,17 +141,7 @@ func serveMCP() error {
 		output.WriteString(fmt.Sprintf("PAST_SESSIONS(query=\"%s\"):\n", query))
 
 		for i, r := range results {
-			ago := formatRelativeShort(r.StartTime)
-			title := r.FirstQuery
-			if title == "" {
-				title = r.Project
-			}
-			if len(title) > 100 {
-				title = title[:97] + "..."
-			}
-
-			output.WriteString(fmt.Sprintf("%d. [%s/%s/%dhits] \"%s\" — %s\n",
-				i+1, r.Project, ago, r.MatchCount, title, r.Tool))
+			output.WriteString(formatSessionLine(i+1, r))
 		}
 
 		return mcp.NewToolResultText(output.String()), nil

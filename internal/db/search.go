@@ -33,12 +33,16 @@ type SessionMatch struct {
 	FirstQuery   string
 	MessageCount int
 	Tool         string
-	StartTime    time.Time
-	MatchCount   int
-	BestRank     float64
-	FinalScore   float64
-	Snippet      string
-	SnippetRole  string
+	// Host is the machine the session was indexed on, empty for a row
+	// written before the column existed. One archive holds several
+	// machines' history, so a result that omits it is ambiguous there.
+	Host        string
+	StartTime   time.Time
+	MatchCount  int
+	BestRank    float64
+	FinalScore  float64
+	Snippet     string
+	SnippetRole string
 }
 
 // sanitizeFTS5Query strips FTS5 special characters to prevent query syntax errors.
@@ -212,9 +216,9 @@ func SearchGrouped(query string, limit int) ([]SessionMatch, error) {
 		var timeStr string
 		err := db.QueryRow(`
 			SELECT project, COALESCE(first_query, ''), message_count, tool,
-				   COALESCE(start_time, indexed_at, '')
+				   COALESCE(host, ''), COALESCE(start_time, indexed_at, '')
 			FROM sessions WHERE id = ?
-		`, sid).Scan(&sm.Project, &sm.FirstQuery, &sm.MessageCount, &sm.Tool, &timeStr)
+		`, sid).Scan(&sm.Project, &sm.FirstQuery, &sm.MessageCount, &sm.Tool, &sm.Host, &timeStr)
 		if err != nil {
 			continue
 		}
