@@ -118,11 +118,7 @@ func indexAntigravitySession(jsonlPath string) (int, int) {
 		}
 
 		if firstQuery == "" && role == "user" {
-			if len(event.Content) > 100 {
-				firstQuery = event.Content[:100] + "..."
-			} else {
-				firstQuery = event.Content
-			}
+			firstQuery = truncate(event.Content, 100)
 		}
 
 		err := db.TxInsertMessage(tx, db.Message{

@@ -120,10 +120,7 @@ Examples:
 			sessionID := fmt.Sprintf("doc:%s:%s", addName, relPath)
 
 			// Create session record first (required for search to work)
-			firstQuery := relPath // Use filename as first query
-			if len(firstQuery) > 200 {
-				firstQuery = firstQuery[:200] // Truncate if too long
-			}
+			firstQuery := truncate(relPath, 200) // the file name stands in for a query
 
 			err = db.TxInsertSessionSimple(tx, sessionID, addName, firstQuery, path, "docs", 1)
 			if err != nil {
