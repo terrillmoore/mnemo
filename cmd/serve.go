@@ -40,14 +40,18 @@ func init() {
 	rootCmd.AddCommand(serveCmd)
 }
 
-// serveMCP starts an MCP (Model Context Protocol) server over stdio, exposing
-// mnemo's search, context, recent, and tools capabilities to MCP clients like
-// Claude Desktop and Claude Code.
-// formatSessionLine renders one search hit for an MCP client. The machine
-// comes before the project, because this server usually answers for an
-// archive holding several machines' history and "which machine" decides
-// where the caller can read the transcript. A row indexed before the host
-// column existed has none, and the field is left out rather than guessed.
+// formatSessionLine renders one search hit for an MCP client.
+// The output is `{n}. [{where}/{ago}/{hits}] "{title}" - {tool}\n`.
+// {n} is the parameter n, normally the 1-origin index of the search hit
+// in the vector of results. The output is not parsable.
+//
+// {where} is either `{r.Host}:{r.Projet}` or `{r.Project}`; but r.Project
+// can contain colons (or slashed), so this presentation is inherently ambiguous.
+// {ago} is an indication of the age of the match relative to the current time.
+// {title} is the first queury, limited to 100 chars. If longer than 100 chars
+// in the row, the first 97 chars are used, with a "..." suffix. Of course this
+// means that the output doesn't distinguish between a prompt that ends in ...
+// and a trimmed prompt.
 func formatSessionLine(n int, r db.SessionMatch) string {
 	ago := formatRelativeShort(r.StartTime)
 	title := r.FirstQuery
@@ -67,6 +71,9 @@ func formatSessionLine(n int, r db.SessionMatch) string {
 		n, where, ago, r.MatchCount, title, r.Tool)
 }
 
+// serveMCP starts an MCP (Model Context Protocol) server over stdio, exposing
+// mnemo's search, context, recent, and tools capabilities to MCP clients like
+// Claude Desktop and Claude Code.
 func serveMCP() error {
 	s := server.NewMCPServer(
 		"mnemo",
