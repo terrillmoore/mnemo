@@ -136,6 +136,15 @@ cross the wire, so a shared machine can search the whole history without
 holding any of it. A machine that should hold a full copy can fetch the index
 instead and search it locally through `MNEMO_DB`.
 
+The archive host itself is the other half, and none of it is in this
+repository: a service account, an encrypted volume, an indexer on a timer, and
+one restricted ssh key per machine per job, each pinned to a forced command so
+a pushing machine can write its own directory and nothing else. MCCI builds
+that with an Ansible role, `claude-archive`, in a private repository. It is
+per person: a second person gets their own host, account, and volume rather
+than a second directory on someone else's, since the whole point is that one
+person's history stays in one place they control.
+
 The pieces above are in the binary. The deployment around them is not, and
 there is no central skill or installer here that anyone can use unmodified:
 each person sets up their own databases, keys, transfer scripts, and the skill
@@ -145,6 +154,53 @@ carries the push and pull scripts, the systemd timers, and a `mnemo` skill
 whose first section says whether the machine it is installed on can reach the
 archive and how. That repo is private; the shape is described here so it can be
 rebuilt rather than copied.
+
+### Reaching an archive that is not on the internet
+
+An archive worth keeping is usually on a private network, and a laptop that
+travels is usually somewhere else. The way in is an ssh jump host, and there is
+one trap in it.
+
+`ProxyJump` opens a second, separate connection to the jump host. The
+`IdentityFile` and `IdentitiesOnly` in the alias govern the connection to the
+archive, not that one, so the hop authenticates with whatever is left over:
+the default identity files, or an agent. That works at the keyboard, where an
+agent is loaded and a passphrase prompt gets an answer, and fails from a timer,
+which has neither. It fails quietly too, because the transfers retry.
+
+Name the key for the hop as well. The key the archive already knows can serve,
+so there is nothing extra to issue or revoke:
+
+```
+Host archive
+    ProxyCommand ssh -W %h:%p -i ~/.ssh/mnemo-push_ed25519 -o IdentitiesOnly=yes you@jump.example.com
+    HostName 10.0.0.8
+    User archive-account
+    IdentityFile ~/.ssh/mnemo-push_ed25519
+    IdentitiesOnly yes
+```
+
+On the jump host, hold that key to forwarding toward the archive and nothing
+else, so a passphrase-less key is not a shell:
+
+```
+restrict,port-forwarding,permitopen="10.0.0.8:22" ssh-ed25519 AAAA... laptop-push
+```
+
+Then prove it the way a timer will run it, with no agent:
+
+```bash
+SSH_AUTH_SOCK= ssh -o BatchMode=yes archive true
+```
+
+A key under a forced command answers with the forced command's own complaint,
+which means it authenticated: `rrsync error: SSH_ORIGINAL_COMMAND does not run
+rsync`, exit 1. `Permission denied (publickey)` names the host that refused,
+which tells you whether the hop or the archive is the problem.
+
+Every key on a machine that transfers on a timer must be passphrase-less for
+the same reason, and must therefore be worth nothing on its own: pinned to one
+directory, or to one forced command, or to one forwarding destination.
 
 ## Commands
 
