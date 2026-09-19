@@ -124,6 +124,9 @@ func TestTruncate(t *testing.T) {
 		{name: "exact length", input: "hello", maxLen: 5, want: "hello"},
 		{name: "needs truncation", input: "hello world", maxLen: 8, want: "hello wo..."},
 		{name: "very short max", input: "hello world", maxLen: 4, want: "hell..."},
+		// Counting runes, not bytes: cutting "日本語" at byte 4 leaves half a
+		// rune and the output is no longer valid UTF-8.
+		{name: "multi-byte", input: "日本語テキスト", maxLen: 4, want: "日本語テ..."},
 	}
 
 	for _, tt := range tests {

@@ -225,6 +225,12 @@ type RecentSession struct {
 	InputTokens  int
 	OutputTokens int
 	CostUSD      float64
+	// Host is the machine the session was indexed on, empty when the row
+	// records none. StartTime falls back to indexed_at when the adapter
+	// recorded no start.
+	Host             string
+	WorkingDirectory string
+	StartTime        time.Time
 }
 
 // GetRecentSessions returns the most recent sessions ordered by indexed_at descending.
@@ -233,13 +239,18 @@ func GetRecentSessions(limit int) ([]RecentSession, error) {
 		limit = 10
 	}
 
-	rows, err := db.Query(`
+	hostExpr := "''"
+	if sessionsRecordHost() {
+		hostExpr = "COALESCE(host, '')"
+	}
+	rows, err := db.Query(fmt.Sprintf(`
 		SELECT id, project, first_query, message_count, tool, indexed_at,
-		       model, provider, total_input_tokens, total_output_tokens, total_cost_usd
+		       model, provider, total_input_tokens, total_output_tokens, total_cost_usd,
+		       %s, COALESCE(working_directory, ''), COALESCE(start_time, indexed_at, '')
 		FROM sessions
 		ORDER BY indexed_at DESC
 		LIMIT ?
-	`, limit)
+	`, hostExpr), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -248,12 +259,15 @@ func GetRecentSessions(limit int) ([]RecentSession, error) {
 	var sessions []RecentSession
 	for rows.Next() {
 		var s RecentSession
+		var startStr string
 		err := rows.Scan(&s.ID, &s.Project, &s.FirstQuery, &s.MessageCount, &s.Tool, &s.IndexedAt,
-			&s.Model, &s.Provider, &s.InputTokens, &s.OutputTokens, &s.CostUSD)
+			&s.Model, &s.Provider, &s.InputTokens, &s.OutputTokens, &s.CostUSD,
+			&s.Host, &s.WorkingDirectory, &startStr)
 		if err != nil {
 			log.Printf("GetRecentSessions: rows.Scan error: %v", err)
 			continue
 		}
+		s.StartTime = parseFlexibleTime(startStr)
 		sessions = append(sessions, s)
 	}
 	if err := rows.Err(); err != nil {

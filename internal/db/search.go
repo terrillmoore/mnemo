@@ -33,12 +33,31 @@ type SessionMatch struct {
 	FirstQuery   string
 	MessageCount int
 	Tool         string
-	StartTime    time.Time
-	MatchCount   int
-	BestRank     float64
-	FinalScore   float64
-	Snippet      string
-	SnippetRole  string
+	// Host is the machine the session was indexed on. It is empty for a row
+	// written before the column existed; the machine is unknown, not local.
+	Host string
+	// WorkingDirectory is the directory the session ran in. It identifies
+	// the work more reliably than Project, which several adapters derive
+	// with a heuristic.
+	WorkingDirectory string
+	StartTime        time.Time
+	MatchCount       int
+	BestRank         float64
+	FinalScore       float64
+	Snippet          string
+	SnippetRole      string
+}
+
+// sessionsRecordHost reports whether the sessions table has a host column.
+// The fork adds it when it opens a database for writing; a database only
+// ever written by upstream mnemo does not have it, and a read-only open
+// cannot add one.
+func sessionsRecordHost() bool {
+	var n int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'host'`,
+	).Scan(&n)
+	return err == nil && n > 0
 }
 
 // sanitizeFTS5Query strips FTS5 special characters to prevent query syntax errors.
@@ -196,6 +215,20 @@ func SearchGrouped(query string, limit int) ([]SessionMatch, error) {
 		return nil, fmt.Errorf("grouped search iteration error: %w", err)
 	}
 
+	// A database written only by upstream mnemo has no host column, and the
+	// callers that need one most, such as the MCP server, open the file
+	// read-only and so cannot add it. Ask once and select accordingly.
+	hostExpr := "''"
+	if sessionsRecordHost() {
+		hostExpr = "COALESCE(host, '')"
+	}
+	metaQuery := fmt.Sprintf(`
+		SELECT project, COALESCE(first_query, ''), message_count, tool,
+			   %s, COALESCE(working_directory, ''),
+			   COALESCE(start_time, indexed_at, '')
+		FROM sessions WHERE id = ?
+	`, hostExpr)
+
 	// Build SessionMatch results with session metadata
 	var matches []SessionMatch
 	for _, sid := range order {
@@ -210,11 +243,9 @@ func SearchGrouped(query string, limit int) ([]SessionMatch, error) {
 
 		// Fetch session metadata (scan time as string due to mixed timestamp formats)
 		var timeStr string
-		err := db.QueryRow(`
-			SELECT project, COALESCE(first_query, ''), message_count, tool,
-				   COALESCE(start_time, indexed_at, '')
-			FROM sessions WHERE id = ?
-		`, sid).Scan(&sm.Project, &sm.FirstQuery, &sm.MessageCount, &sm.Tool, &timeStr)
+		err := db.QueryRow(metaQuery, sid).
+			Scan(&sm.Project, &sm.FirstQuery, &sm.MessageCount, &sm.Tool, &sm.Host,
+				&sm.WorkingDirectory, &timeStr)
 		if err != nil {
 			continue
 		}

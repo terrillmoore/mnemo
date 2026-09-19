@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/Pilan-AI/mnemo/internal/db"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -44,13 +43,6 @@ func init() {
 // mnemo's search, context, recent, and tools capabilities to MCP clients like
 // Claude Desktop and Claude Code.
 func serveMCP() error {
-	s := server.NewMCPServer(
-		"mnemo",
-		Version,
-		server.WithToolCapabilities(false),
-		server.WithRecovery(),
-	)
-
 	// Read-only: this server answers queries and must never write to the
 	// database it is pointed at. On an archive host it runs under a forced
 	// ssh command for remote endpoints, where a schema migration triggered by
@@ -60,8 +52,33 @@ func serveMCP() error {
 	}
 	defer db.CloseDB()
 
+	s := newMCPServer()
+
+	log.Printf("mnemo MCP server starting...")
+
+	if err := server.ServeStdio(s); err != nil {
+		return fmt.Errorf("server error: %w", err)
+	}
+
+	return nil
+}
+
+// newMCPServer builds the server and registers the tools, against whatever
+// database the package is already connected to. It is separate from serveMCP
+// so a test can call the same handlers a client reaches, through
+// MCPServer.HandleMessage, without a database of its own choosing, a process,
+// or stdio.
+func newMCPServer() *server.MCPServer {
+	s := server.NewMCPServer(
+		"mnemo",
+		Version,
+		server.WithToolCapabilities(false),
+		server.WithRecovery(),
+	)
+
 	searchTool := mcp.NewTool("mnemo_search",
 		mcp.WithDescription("Search across all indexed AI coding conversations"),
+		mcp.WithOutputSchema[searchResponse](),
 		mcp.WithString("query",
 			mcp.Required(),
 			mcp.Description("Search query - can be keywords, code patterns, or natural language"),
@@ -95,10 +112,6 @@ func serveMCP() error {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}
 
-		if len(results) == 0 {
-			return mcp.NewToolResultText("No past sessions found."), nil
-		}
-
 		if projectFilter != "" {
 			filtered := make([]db.SessionMatch, 0, limit)
 			for _, r := range results {
@@ -112,29 +125,17 @@ func serveMCP() error {
 			}
 		}
 
-		// Tier 2: Token-efficient structured output for AI context injection
-		var output strings.Builder
-		output.WriteString(fmt.Sprintf("PAST_SESSIONS(query=\"%s\"):\n", query))
-
-		for i, r := range results {
-			ago := formatRelativeShort(r.StartTime)
-			title := r.FirstQuery
-			if title == "" {
-				title = r.Project
-			}
-			if len(title) > 100 {
-				title = title[:97] + "..."
-			}
-
-			output.WriteString(fmt.Sprintf("%d. [%s/%s/%dhits] \"%s\" — %s\n",
-				i+1, r.Project, ago, r.MatchCount, title, r.Tool))
-		}
-
-		return mcp.NewToolResultText(output.String()), nil
+		return mcp.NewToolResultJSON(searchResponse{
+			Query:   query,
+			Project: optString(projectFilter),
+			Count:   len(results),
+			Results: newSessionHits(results),
+		})
 	})
 
 	contextTool := mcp.NewTool("mnemo_context",
 		mcp.WithDescription("Generate context summary for a project based on past sessions"),
+		mcp.WithOutputSchema[contextResponse](),
 		mcp.WithString("project",
 			mcp.Required(),
 			mcp.Description("Project name to get context for"),
@@ -152,10 +153,6 @@ func serveMCP() error {
 			return mcp.NewToolResultError(fmt.Sprintf("context search failed: %v", err)), nil
 		}
 
-		if len(results) == 0 {
-			return mcp.NewToolResultText(fmt.Sprintf("No context found for project: %s", project)), nil
-		}
-
 		// Filter to matching project
 		filtered := make([]db.SessionMatch, 0)
 		for _, r := range results {
@@ -167,27 +164,16 @@ func serveMCP() error {
 			results = filtered
 		}
 
-		var output strings.Builder
-		output.WriteString(fmt.Sprintf("PROJECT_CONTEXT(%s):\n", project))
-
-		for i, r := range results {
-			ago := formatRelativeShort(r.StartTime)
-			title := r.FirstQuery
-			if title == "" {
-				title = "(no query)"
-			}
-			if len(title) > 100 {
-				title = title[:97] + "..."
-			}
-			output.WriteString(fmt.Sprintf("%d. [%s/%dmsg] \"%s\" — %s\n",
-				i+1, ago, r.MessageCount, title, r.Tool))
-		}
-
-		return mcp.NewToolResultText(output.String()), nil
+		return mcp.NewToolResultJSON(contextResponse{
+			Project:  project,
+			Count:    len(results),
+			Sessions: newSessionHits(results),
+		})
 	})
 
 	recentTool := mcp.NewTool("mnemo_recent",
 		mcp.WithDescription("Show recent AI coding sessions"),
+		mcp.WithOutputSchema[recentResponse](),
 		mcp.WithNumber("limit",
 			mcp.Description("Maximum number of sessions to return (default: 10)"),
 		),
@@ -201,60 +187,23 @@ func serveMCP() error {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to get recent sessions: %v", err)), nil
 		}
 
-		if len(sessions) == 0 {
-			return mcp.NewToolResultText("No sessions found."), nil
-		}
-
-		var output strings.Builder
-		output.WriteString(fmt.Sprintf("Recent sessions (limit %d):\n\n", limit))
-
-		for i, session := range sessions {
-			output.WriteString(fmt.Sprintf("[%d] %s\n", i+1, session.Project))
-			output.WriteString(fmt.Sprintf("    First query: %s\n", shorten(session.FirstQuery, 80)))
-			output.WriteString(fmt.Sprintf("    Messages: %d\n", session.MessageCount))
-			output.WriteString(fmt.Sprintf("    Tool: %s\n\n", session.Tool))
-		}
-
-		return mcp.NewToolResultText(output.String()), nil
+		return mcp.NewToolResultJSON(recentResponse{
+			Limit:    limit,
+			Count:    len(sessions),
+			Sessions: newRecentEntries(sessions),
+		})
 	})
 
 	toolsTool := mcp.NewTool("mnemo_tools",
 		mcp.WithDescription("List detected AI coding tools on this system"),
+		mcp.WithOutputSchema[toolsResponse](),
 	)
 
 	s.AddTool(toolsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		tools := detectTools()
-
-		var output strings.Builder
-		output.WriteString("Detected AI coding tools:\n\n")
-
-		for i, tool := range tools {
-			status := "✗"
-			if tool.Installed {
-				status = "✓"
-			}
-			output.WriteString(fmt.Sprintf("[%d] %s %s\n", i+1, status, tool.Name))
-			output.WriteString(fmt.Sprintf("    Path: %s\n\n", tool.Path))
-		}
-
-		detected := 0
-		for _, tool := range tools {
-			if tool.Installed {
-				detected++
-			}
-		}
-		output.WriteString(fmt.Sprintf("Detected: %d/%d tools\n", detected, len(tools)))
-
-		return mcp.NewToolResultText(output.String()), nil
+		return mcp.NewToolResultJSON(newToolsResponse(detectTools()))
 	})
 
-	log.Printf("mnemo MCP server starting...")
-
-	if err := server.ServeStdio(s); err != nil {
-		return fmt.Errorf("server error: %w", err)
-	}
-
-	return nil
+	return s
 }
 
 // Tool represents a detected AI coding tool for the MCP tools endpoint.
@@ -288,29 +237,4 @@ func detectTools() []Tool {
 	}
 
 	return tools
-}
-
-func shorten(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
-}
-
-// formatRelativeShort returns a compact relative time for MCP context.
-func formatRelativeShort(t time.Time) string {
-	if t.IsZero() {
-		return "?"
-	}
-	d := time.Since(t)
-	switch {
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	case d < 30*24*time.Hour:
-		return fmt.Sprintf("%dd", int(d.Hours()/24))
-	default:
-		return t.Format("Jan2")
-	}
 }
