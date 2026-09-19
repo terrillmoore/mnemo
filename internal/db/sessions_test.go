@@ -387,3 +387,70 @@ func TestGetMaxIndexedAtByTool(t *testing.T) {
 		t.Error("expected 'opencode' in results")
 	}
 }
+
+// GetRecentSessions feeds the MCP server, which answers for an archive, so
+// each row has to say which machine it came from and where it ran.
+func TestGetRecentSessionsCarriesMachineAndDirectory(t *testing.T) {
+	defer setupTestDB(t)()
+
+	saved := Host()
+	defer SetHost(saved)
+	SetHost("apollo")
+
+	// A wall-clock time, as an indexer supplies: time.Now() carries a
+	// monotonic reading that the driver writes into the column as a trailing
+	// "m=..." field, which no reader parses.
+	start := time.Date(2026, 9, 18, 14, 0, 0, 0, time.UTC)
+	if err := InsertSession(Session{
+		ID: "s1", Project: "proj", Tool: "claude", MessageCount: 3,
+		WorkingDirectory: "/home/tmm/proj", StartTime: start,
+	}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+
+	sessions, err := GetRecentSessions(10)
+	if err != nil {
+		t.Fatalf("GetRecentSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(sessions))
+	}
+
+	got := sessions[0]
+	if got.Host != "apollo" {
+		t.Errorf("Host = %q, want apollo", got.Host)
+	}
+	if got.WorkingDirectory != "/home/tmm/proj" {
+		t.Errorf("WorkingDirectory = %q", got.WorkingDirectory)
+	}
+	if !got.StartTime.Equal(start) {
+		t.Errorf("StartTime = %v, want %v", got.StartTime, start)
+	}
+}
+
+// A database written only by upstream mnemo has no host column. Recent
+// sessions must still list, with the machine left empty.
+func TestGetRecentSessionsWithoutHostColumn(t *testing.T) {
+	defer setupTestDB(t)()
+
+	if err := InsertSession(Session{ID: "s1", Project: "proj", Tool: "claude"}); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+	if _, err := db.Exec("DROP INDEX IF EXISTS idx_sessions_host"); err != nil {
+		t.Fatalf("dropping the host index: %v", err)
+	}
+	if _, err := db.Exec("ALTER TABLE sessions DROP COLUMN host"); err != nil {
+		t.Fatalf("dropping the host column: %v", err)
+	}
+
+	sessions, err := GetRecentSessions(10)
+	if err != nil {
+		t.Fatalf("GetRecentSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].Host != "" {
+		t.Errorf("Host = %q, want empty", sessions[0].Host)
+	}
+}

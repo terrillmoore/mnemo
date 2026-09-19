@@ -360,3 +360,29 @@ func TestSearchGroupedReportsTheHost(t *testing.T) {
 		t.Errorf("Host = %q, want %q", results[0].Host, "apollo")
 	}
 }
+
+// The working directory identifies the work when the derived project name
+// does not: two machines both hold /home/tmm/sales-pipeline, and the Windows
+// tree mangles the path into the project name.
+func TestSearchGroupedReportsTheWorkingDirectory(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	_ = InsertSession(Session{
+		ID: "sess-1", Project: "proj-a", FirstQuery: "auth question",
+		MessageCount: 1, Tool: "claude", WorkingDirectory: `C:\ss\proj-a`,
+		StartTime: time.Now().Add(-1 * time.Hour),
+	})
+	_ = InsertMessage(Message{SessionID: "sess-1", Project: "proj-a", Role: "user", Content: "How to implement authentication?"})
+
+	results, err := SearchGrouped("authentication", 5)
+	if err != nil {
+		t.Fatalf("SearchGrouped() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 session result, got %d", len(results))
+	}
+	if got, want := results[0].WorkingDirectory, `C:\ss\proj-a`; got != want {
+		t.Errorf("WorkingDirectory = %q, want %q", got, want)
+	}
+}

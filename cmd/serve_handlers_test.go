@@ -1,0 +1,375 @@
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/Pilan-AI/mnemo/internal/db"
+	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/mark3labs/mcp-go/server"
+)
+
+// These tests drive the registered handlers the way a client does, through
+// MCPServer.HandleMessage, so they cover the wiring the converter tests in
+// serve_test.go cannot: parameter parsing, defaults, filtering, the error
+// paths, and the envelope each tool returns.
+
+// seedServer points the db package at a temporary database, fills it with
+// sessions from two machines, and returns the MCP server to drive.
+func seedServer(t *testing.T) *server.MCPServer {
+	t.Helper()
+
+	dir := t.TempDir()
+	t.Setenv("MNEMO_DB", filepath.Join(dir, "test.db"))
+	t.Setenv("HOME", dir) // detectTools looks under the home directory
+
+	if err := db.InitDB(); err != nil {
+		t.Fatalf("opening the test database: %v", err)
+	}
+	t.Cleanup(db.CloseDB)
+
+	saved := db.Host()
+	db.SetHost("tmmnote15")
+	t.Cleanup(func() { db.SetHost(saved) })
+
+	now := time.Now()
+	sessions := []struct {
+		id, project, firstQuery, workdir, host string
+		age                                    time.Duration
+		messages                               []string
+	}{
+		{
+			id: "sess-1", project: "lora-bootloader", firstQuery: "why does the second stage hang",
+			workdir: `C:\ss\lora-bootloader`, host: "tmmnote15", age: time.Hour,
+			messages: []string{
+				"The second stage hangs waiting for the watchdog.",
+				"Disable the watchdog and the second stage boots.",
+			},
+		},
+		{
+			id: "sess-2", project: "standard-tools", firstQuery: "bsdmake parallel jobs",
+			workdir: "/home/tmm/ss", host: "mercury2-emb-ah3", age: 48 * time.Hour,
+			messages: []string{"The watchdog is unrelated to bsdmake."},
+		},
+	}
+
+	for _, s := range sessions {
+		start := now.Add(-s.age)
+		if err := db.InsertSession(db.Session{
+			ID: s.id, Project: s.project, FirstQuery: s.firstQuery,
+			MessageCount: len(s.messages), Tool: "claude", WorkingDirectory: s.workdir,
+			Host: s.host, StartTime: start, IndexedAt: start,
+		}); err != nil {
+			t.Fatalf("seeding %s: %v", s.id, err)
+		}
+		for _, content := range s.messages {
+			if err := db.InsertMessage(db.Message{
+				SessionID: s.id, Project: s.project, Role: "user", Content: content,
+			}); err != nil {
+				t.Fatalf("seeding a message of %s: %v", s.id, err)
+			}
+		}
+	}
+
+	return newMCPServer()
+}
+
+// call sends one tools/call and returns the reply's structuredContent, the
+// text block, and whether the server marked the result an error.
+func call(t *testing.T, s *server.MCPServer, tool string, args map[string]any) (map[string]any, string, bool) {
+	t.Helper()
+
+	request := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params":  map[string]any{"name": tool, "arguments": args},
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("building the request: %v", err)
+	}
+
+	reply, err := json.Marshal(s.HandleMessage(context.Background(), raw))
+	if err != nil {
+		t.Fatalf("marshalling the reply: %v", err)
+	}
+
+	var envelope struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			StructuredContent map[string]any `json:"structuredContent"`
+			IsError           bool           `json:"isError"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(reply, &envelope); err != nil {
+		t.Fatalf("reading the reply: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("%s returned a protocol error: %s", tool, envelope.Error.Message)
+	}
+
+	text := ""
+	if len(envelope.Result.Content) > 0 {
+		text = envelope.Result.Content[0].Text
+	}
+	return envelope.Result.StructuredContent, text, envelope.Result.IsError
+}
+
+func TestSearchHandlerReturnsBothMachines(t *testing.T) {
+	s := seedServer(t)
+
+	got, text, isErr := call(t, s, "mnemo_search", map[string]any{"query": "watchdog"})
+	if isErr {
+		t.Fatalf("search reported an error: %s", text)
+	}
+
+	if got["query"] != "watchdog" {
+		t.Errorf("query = %v", got["query"])
+	}
+	if got["count"] != float64(2) {
+		t.Errorf("count = %v, want 2", got["count"])
+	}
+
+	hosts := map[string]bool{}
+	for _, hit := range got["results"].([]any) {
+		h := hit.(map[string]any)
+		hosts[fmt.Sprint(h["host"])] = true
+		if h["session_id"] == "" || h["session_id"] == nil {
+			t.Error("a hit carries no session_id")
+		}
+	}
+	for _, want := range []string{"tmmnote15", "mercury2-emb-ah3"} {
+		if !hosts[want] {
+			t.Errorf("no hit from %s; got %v", want, hosts)
+		}
+	}
+}
+
+// The text block exists for a client that reads no structured content, so it
+// must carry the same data rather than a summary of it.
+func TestSearchHandlerTextBlockMatchesTheStructure(t *testing.T) {
+	s := seedServer(t)
+
+	got, text, _ := call(t, s, "mnemo_search", map[string]any{"query": "watchdog"})
+
+	var fromText map[string]any
+	if err := json.Unmarshal([]byte(text), &fromText); err != nil {
+		t.Fatalf("the text block is not JSON: %v", err)
+	}
+	if fmt.Sprint(fromText) != fmt.Sprint(got) {
+		t.Errorf("text block and structuredContent differ:\n text: %v\n data: %v", fromText, got)
+	}
+}
+
+func TestSearchHandlerHonoursLimit(t *testing.T) {
+	s := seedServer(t)
+
+	got, _, _ := call(t, s, "mnemo_search", map[string]any{"query": "watchdog", "limit": 1})
+	if got["count"] != float64(1) {
+		t.Errorf("count = %v, want 1", got["count"])
+	}
+	if n := len(got["results"].([]any)); n != 1 {
+		t.Errorf("returned %d results, want 1", n)
+	}
+}
+
+func TestSearchHandlerFiltersByProject(t *testing.T) {
+	s := seedServer(t)
+
+	got, _, _ := call(t, s, "mnemo_search", map[string]any{"query": "watchdog", "project": "standard-tools"})
+
+	if got["project_filter"] != "standard-tools" {
+		t.Errorf("project_filter = %v", got["project_filter"])
+	}
+	results := got["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("returned %d results, want only the filtered one", len(results))
+	}
+	if p := results[0].(map[string]any)["project"]; p != "standard-tools" {
+		t.Errorf("project = %v, want standard-tools", p)
+	}
+}
+
+func TestSearchHandlerAnswersEmptyWhenNothingMatches(t *testing.T) {
+	s := seedServer(t)
+
+	got, _, isErr := call(t, s, "mnemo_search", map[string]any{"query": "zzqqxx"})
+	if isErr {
+		t.Error("a query with no hits is not an error")
+	}
+	if got["count"] != float64(0) {
+		t.Errorf("count = %v, want 0", got["count"])
+	}
+	if results, ok := got["results"].([]any); !ok || len(results) != 0 {
+		t.Errorf("results = %#v, want []", got["results"])
+	}
+}
+
+func TestSearchHandlerRejectsAMissingQuery(t *testing.T) {
+	s := seedServer(t)
+
+	_, text, isErr := call(t, s, "mnemo_search", map[string]any{})
+	if !isErr {
+		t.Fatalf("a missing query should be an error result; got %q", text)
+	}
+	if text == "" {
+		t.Error("the error result says nothing")
+	}
+}
+
+func TestContextHandlerReturnsTheProjectsSessions(t *testing.T) {
+	s := seedServer(t)
+
+	got, text, isErr := call(t, s, "mnemo_context", map[string]any{"project": "lora-bootloader"})
+	if isErr {
+		t.Fatalf("context reported an error: %s", text)
+	}
+	if got["project"] != "lora-bootloader" {
+		t.Errorf("project = %v", got["project"])
+	}
+	sessions := got["sessions"].([]any)
+	if len(sessions) == 0 {
+		t.Fatal("no sessions returned")
+	}
+	for _, s := range sessions {
+		if p := s.(map[string]any)["project"]; p != "lora-bootloader" {
+			t.Errorf("project = %v, want only lora-bootloader", p)
+		}
+	}
+}
+
+func TestContextHandlerAnswersEmptyForAnUnknownProject(t *testing.T) {
+	s := seedServer(t)
+
+	got, _, isErr := call(t, s, "mnemo_context", map[string]any{"project": "no-such-project"})
+	if isErr {
+		t.Error("an unknown project is not an error")
+	}
+	if got["count"] != float64(0) {
+		t.Errorf("count = %v, want 0", got["count"])
+	}
+	if sessions, ok := got["sessions"].([]any); !ok || len(sessions) != 0 {
+		t.Errorf("sessions = %#v, want []", got["sessions"])
+	}
+}
+
+func TestRecentHandlerCarriesMachineAndDirectory(t *testing.T) {
+	s := seedServer(t)
+
+	got, text, isErr := call(t, s, "mnemo_recent", map[string]any{"limit": 2})
+	if isErr {
+		t.Fatalf("recent reported an error: %s", text)
+	}
+	if got["limit"] != float64(2) {
+		t.Errorf("limit = %v, want 2", got["limit"])
+	}
+
+	sessions := got["sessions"].([]any)
+	if len(sessions) != 2 {
+		t.Fatalf("returned %d sessions, want 2", len(sessions))
+	}
+	for _, entry := range sessions {
+		e := entry.(map[string]any)
+		if e["host"] == nil || e["working_directory"] == nil {
+			t.Errorf("entry %v lost the machine or the directory", e["session_id"])
+		}
+		if e["indexed_at"] == nil {
+			t.Errorf("entry %v has no indexed_at", e["session_id"])
+		}
+	}
+}
+
+func TestToolsHandlerReportsWhatItLookedFor(t *testing.T) {
+	s := seedServer(t)
+
+	got, text, isErr := call(t, s, "mnemo_tools", map[string]any{})
+	if isErr {
+		t.Fatalf("tools reported an error: %s", text)
+	}
+	count, ok := got["count"].(float64)
+	if !ok || count == 0 {
+		t.Fatalf("count = %v, want the number of tools looked for", got["count"])
+	}
+	if n := len(got["tools"].([]any)); float64(n) != count {
+		t.Errorf("count says %v, list holds %d", count, n)
+	}
+}
+
+// Every tool publishes an output schema at tools/list. A reply that does not
+// satisfy it breaks the promise a client was given, so check each one against
+// its own schema rather than trusting that the two were generated together.
+func TestRepliesSatisfyTheirPublishedSchema(t *testing.T) {
+	s := seedServer(t)
+
+	raw, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+	})
+	if err != nil {
+		t.Fatalf("building the request: %v", err)
+	}
+	listed, err := json.Marshal(s.HandleMessage(context.Background(), raw))
+	if err != nil {
+		t.Fatalf("marshalling tools/list: %v", err)
+	}
+
+	var envelope struct {
+		Result struct {
+			Tools []struct {
+				Name         string           `json:"name"`
+				OutputSchema *json.RawMessage `json:"outputSchema"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(listed, &envelope); err != nil {
+		t.Fatalf("reading tools/list: %v", err)
+	}
+	if len(envelope.Result.Tools) != 4 {
+		t.Fatalf("tools/list returned %d tools, want 4", len(envelope.Result.Tools))
+	}
+
+	arguments := map[string]map[string]any{
+		"mnemo_search":  {"query": "watchdog"},
+		"mnemo_context": {"project": "lora-bootloader"},
+		"mnemo_recent":  {"limit": 2},
+		"mnemo_tools":   {},
+	}
+
+	for _, tool := range envelope.Result.Tools {
+		t.Run(tool.Name, func(t *testing.T) {
+			if tool.OutputSchema == nil {
+				t.Fatal("publishes no output schema")
+			}
+
+			var schema jsonschema.Schema
+			if err := json.Unmarshal(*tool.OutputSchema, &schema); err != nil {
+				t.Fatalf("reading the published schema: %v", err)
+			}
+			resolved, err := schema.Resolve(nil)
+			if err != nil {
+				t.Fatalf("resolving the published schema: %v", err)
+			}
+
+			args, ok := arguments[tool.Name]
+			if !ok {
+				t.Fatalf("no arguments in this test for %s", tool.Name)
+			}
+			got, _, isErr := call(t, s, tool.Name, args)
+			if isErr {
+				t.Fatalf("%s returned an error result", tool.Name)
+			}
+			if err := resolved.Validate(got); err != nil {
+				t.Errorf("the reply does not satisfy the published schema: %v", err)
+			}
+		})
+	}
+}

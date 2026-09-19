@@ -43,13 +43,6 @@ func init() {
 // mnemo's search, context, recent, and tools capabilities to MCP clients like
 // Claude Desktop and Claude Code.
 func serveMCP() error {
-	s := server.NewMCPServer(
-		"mnemo",
-		Version,
-		server.WithToolCapabilities(false),
-		server.WithRecovery(),
-	)
-
 	// Read-only: this server answers queries and must never write to the
 	// database it is pointed at. On an archive host it runs under a forced
 	// ssh command for remote endpoints, where a schema migration triggered by
@@ -58,6 +51,30 @@ func serveMCP() error {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 	defer db.CloseDB()
+
+	s := newMCPServer()
+
+	log.Printf("mnemo MCP server starting...")
+
+	if err := server.ServeStdio(s); err != nil {
+		return fmt.Errorf("server error: %w", err)
+	}
+
+	return nil
+}
+
+// newMCPServer builds the server and registers the tools, against whatever
+// database the package is already connected to. It is separate from serveMCP
+// so a test can call the same handlers a client reaches, through
+// MCPServer.HandleMessage, without a database of its own choosing, a process,
+// or stdio.
+func newMCPServer() *server.MCPServer {
+	s := server.NewMCPServer(
+		"mnemo",
+		Version,
+		server.WithToolCapabilities(false),
+		server.WithRecovery(),
+	)
 
 	searchTool := mcp.NewTool("mnemo_search",
 		mcp.WithDescription("Search across all indexed AI coding conversations"),
@@ -186,13 +203,7 @@ func serveMCP() error {
 		return mcp.NewToolResultJSON(newToolsResponse(detectTools()))
 	})
 
-	log.Printf("mnemo MCP server starting...")
-
-	if err := server.ServeStdio(s); err != nil {
-		return fmt.Errorf("server error: %w", err)
-	}
-
-	return nil
+	return s
 }
 
 // Tool represents a detected AI coding tool for the MCP tools endpoint.
