@@ -9,6 +9,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // SearchResult holds a single FTS5 search match with BM25 ranking.
@@ -56,27 +57,47 @@ func sessionsRecordHost() bool {
 	return hasColumn("sessions", "host")
 }
 
-// sanitizeFTS5Query strips FTS5 special characters to prevent query syntax errors.
-// Returns an error if the query is empty after sanitization.
-func sanitizeFTS5Query(query string) (string, error) {
-	specialChars := []string{"?", "*", "(", ")", "^", ":", "+", "-", "\"", "'"}
-
-	result := query
-	for _, char := range specialChars {
-		result = strings.ReplaceAll(result, char, " ")
+// fts5MatchExpr turns what a person typed into an FTS5 MATCH expression.
+//
+// Each whitespace-separated term becomes a quoted string, and the terms are
+// ANDed. Quoting is what makes punctuation safe: inside quotes FTS5 tokenizes
+// a term instead of parsing it, so "V1.15" searches for the tokens V1 and 15
+// adjacent, which is what the person meant, and no input can produce a syntax
+// error.
+//
+// This replaces stripping a list of characters, which failed twice over. The
+// list has to be right about every character SQLite's parser cares about, and
+// it was not: a full stop reached FTS5 and the search died with
+// `fts5: syntax error near "."`. It also threw away characters our own
+// searches need, so `-j all` searched for "j all", `C++` for "C", and a
+// quoted phrase could not be expressed at all.
+//
+// A term holding no letter or digit is dropped rather than quoted: it would
+// tokenize to nothing, and an empty phrase is not a useful thing to AND.
+func fts5MatchExpr(query string) (string, error) {
+	var terms []string
+	for _, field := range strings.Fields(query) {
+		if !hasWordCharacter(field) {
+			continue
+		}
+		terms = append(terms, `"`+strings.ReplaceAll(field, `"`, `""`)+`"`)
 	}
 
-	for strings.Contains(result, "  ") {
-		result = strings.ReplaceAll(result, "  ", " ")
+	if len(terms) == 0 {
+		return "", fmt.Errorf("search query has no word to match on (original: %q)", query)
 	}
 
-	result = strings.TrimSpace(result)
+	return strings.Join(terms, " AND "), nil
+}
 
-	if result == "" {
-		return "", fmt.Errorf("search query is empty after sanitization (original: %q)", query)
+// hasWordCharacter reports whether s holds anything FTS5 would tokenize.
+func hasWordCharacter(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
 	}
-
-	return result, nil
+	return false
 }
 
 // Search performs a full-text search using FTS5 with BM25 ranking.
@@ -86,7 +107,7 @@ func Search(query string, limit int) ([]SearchResult, error) {
 		limit = 10
 	}
 
-	safeQuery, err := sanitizeFTS5Query(query)
+	safeQuery, err := fts5MatchExpr(query)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +158,7 @@ func SearchGrouped(query string, limit int) ([]SessionMatch, error) {
 		limit = 5
 	}
 
-	safeQuery, err := sanitizeFTS5Query(query)
+	safeQuery, err := fts5MatchExpr(query)
 	if err != nil {
 		return nil, err
 	}
