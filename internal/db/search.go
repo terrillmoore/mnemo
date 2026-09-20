@@ -285,7 +285,13 @@ type GroupedSearch struct {
 // pass that comes back empty is retried as "any term". Which pass produced
 // the results is reported rather than left for the caller to assume.
 func SearchGroupedExplained(query string, limit int, filter SearchFilter) (GroupedSearch, error) {
-	matches, err := searchGrouped(query, limit, MatchAll, filter)
+	return SearchGroupedWithSnippet(query, limit, filter, 0)
+}
+
+// SearchGroupedWithSnippet is SearchGroupedExplained with the snippet width
+// named. snippetTokens of 0 takes the default.
+func SearchGroupedWithSnippet(query string, limit int, filter SearchFilter, snippetTokens int) (GroupedSearch, error) {
+	matches, err := searchGroupedSnippet(query, limit, MatchAll, filter, snippetTokens)
 	if err != nil {
 		return GroupedSearch{}, err
 	}
@@ -293,7 +299,7 @@ func SearchGroupedExplained(query string, limit int, filter SearchFilter) (Group
 		return GroupedSearch{Matches: matches, Mode: MatchAll}, nil
 	}
 
-	loose, err := searchGrouped(query, limit, MatchAny, filter)
+	loose, err := searchGroupedSnippet(query, limit, MatchAny, filter, snippetTokens)
 	if err != nil {
 		return GroupedSearch{}, err
 	}
@@ -318,8 +324,27 @@ func SearchGrouped(query string, limit int) ([]SessionMatch, error) {
 }
 
 func searchGrouped(query string, limit int, mode MatchMode, filter SearchFilter) ([]SessionMatch, error) {
+	return searchGroupedSnippet(query, limit, mode, filter, 0)
+}
+
+// DefaultSnippetTokens is how much of a matching message comes back when the
+// caller does not say. Wider snippets cost tokens in whatever reads them;
+// reading the whole passage is what mnemo_session is for.
+const DefaultSnippetTokens = 64
+
+// MaxSnippetTokens caps what a caller can ask for. Past this, fetching the
+// session is both cheaper and complete.
+const MaxSnippetTokens = 256
+
+func searchGroupedSnippet(query string, limit int, mode MatchMode, filter SearchFilter, snippetTokens int) ([]SessionMatch, error) {
 	if limit <= 0 {
 		limit = 5
+	}
+	if snippetTokens <= 0 {
+		snippetTokens = DefaultSnippetTokens
+	}
+	if snippetTokens > MaxSnippetTokens {
+		snippetTokens = MaxSnippetTokens
 	}
 
 	safeQuery, err := fts5MatchExprMode(query, mode)
@@ -337,12 +362,12 @@ func searchGrouped(query string, limit int, mode MatchMode, filter SearchFilter)
 	// query already groups by session, and the join is what lets a caller
 	// narrow by machine or directory in SQL rather than after the fact.
 	where, filterArgs := filter.sqlWhere()
-	args := append([]any{safeQuery}, filterArgs...)
+	args := append([]any{snippetTokens, safeQuery}, filterArgs...)
 	args = append(args, fetchLimit)
 
 	rows, err := db.Query(fmt.Sprintf(`
 		SELECT m.session_id, m.role,
-			   snippet(messages_fts, 0, '⟪', '⟫', '...', 64) as snippet,
+			   snippet(messages_fts, 0, '⟪', '⟫', '...', ?) as snippet,
 			   bm25(messages_fts) as rank
 		FROM messages_fts
 		JOIN messages m ON messages_fts.rowid = m.id

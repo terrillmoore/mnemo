@@ -73,7 +73,7 @@ func TestSearchResponseCarriesEveryField(t *testing.T) {
 		"started_at":        "2026-09-16T19:17:04Z",
 		"message_count":     float64(395),
 		"match_count":       float64(7),
-		"score":             -19.357,
+		"rank":              float64(1),
 		"first_query":       "why does the second stage hang",
 		"snippet":           "the ⟪second⟫ stage",
 		"snippet_role":      "tool_result",
@@ -95,7 +95,7 @@ func TestSessionHitReportsUnknownFieldsAsNull(t *testing.T) {
 		SessionID: "s1",
 		Project:   "proj",
 		Tool:      "claude",
-	}))
+	}, 1))
 
 	for _, field := range []string{"host", "working_directory", "started_at", "age_days", "first_query", "snippet", "snippet_role"} {
 		v, present := m[field]
@@ -118,7 +118,7 @@ func TestSessionHitKeepsMultiByteTextWhole(t *testing.T) {
 		Project:    "proj",
 		Tool:       "claude",
 		FirstQuery: title,
-	}))
+	}, 1))
 
 	got, ok := m["first_query"].(string)
 	if !ok {

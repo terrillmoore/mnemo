@@ -102,6 +102,9 @@ func newMCPServer() *server.MCPServer {
 		mcp.WithString("since",
 			mcp.Description("Only sessions that started on or after this date, written YYYY-MM-DD"),
 		),
+		mcp.WithNumber("snippet_tokens",
+			mcp.Description("How much of each matching message to return, in tokens (default: 64, most: 256). Reading a whole passage is what mnemo_session is for."),
+		),
 	)
 
 	s.AddTool(searchTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -124,7 +127,9 @@ func newMCPServer() *server.MCPServer {
 			Since:            request.GetString("since", ""),
 		}
 
-		found, err := db.SearchGroupedExplained(query, limit, filter)
+		snippetTokens := request.GetInt("snippet_tokens", db.DefaultSnippetTokens)
+
+		found, err := db.SearchGroupedWithSnippet(query, limit, filter, snippetTokens)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}

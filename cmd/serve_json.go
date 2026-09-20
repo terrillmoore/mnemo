@@ -40,10 +40,12 @@ type sessionHit struct {
 	StartedAt    *string `json:"started_at"`
 	AgeDays      *int    `json:"age_days"`
 	MessageCount int     `json:"message_count"`
-	// MatchCount is how many rows of this session matched. Score is the
-	// composite rank, more negative being a better match.
-	MatchCount int     `json:"match_count"`
-	Score      float64 `json:"score"`
+	// MatchCount is how many rows of this session matched. Rank is this
+	// hit's place in the ordering, 1 for the best, which is what a reader
+	// can actually use: the underlying score is a raw BM25 value, negative,
+	// unbounded, and comparable only within one reply.
+	MatchCount int `json:"match_count"`
+	Rank       int `json:"rank"`
 	// FirstQuery is the session's opening prompt as the indexer stored it,
 	// null when it stored none.
 	FirstQuery *string `json:"first_query"`
@@ -256,9 +258,11 @@ func ageDays(t time.Time) *int {
 	return &d
 }
 
-// newSessionHit converts one search result for the wire.
-func newSessionHit(r db.SessionMatch) sessionHit {
+// newSessionHit converts one search result for the wire. rank is the hit's
+// place in the ordering, from 1.
+func newSessionHit(r db.SessionMatch, rank int) sessionHit {
 	return sessionHit{
+		Rank:             rank,
 		SessionID:        r.SessionID,
 		Host:             optString(r.Host),
 		Project:          r.Project,
@@ -268,7 +272,6 @@ func newSessionHit(r db.SessionMatch) sessionHit {
 		AgeDays:          ageDays(r.StartTime),
 		MessageCount:     r.MessageCount,
 		MatchCount:       r.MatchCount,
-		Score:            r.FinalScore,
 		FirstQuery:       optString(r.FirstQuery),
 		Snippet:          optString(r.Snippet),
 		SnippetRole:      optString(r.SnippetRole),
@@ -279,8 +282,8 @@ func newSessionHit(r db.SessionMatch) sessionHit {
 // empty result marshals as [] rather than null.
 func newSessionHits(results []db.SessionMatch) []sessionHit {
 	hits := make([]sessionHit, 0, len(results))
-	for _, r := range results {
-		hits = append(hits, newSessionHit(r))
+	for i, r := range results {
+		hits = append(hits, newSessionHit(r, i+1))
 	}
 	return hits
 }
