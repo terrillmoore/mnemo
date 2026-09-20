@@ -6,39 +6,75 @@ import (
 	"time"
 )
 
-func TestSanitizeFTS5Query(t *testing.T) {
+func TestFTS5MatchExpr(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   string
 		want    string
 		wantErr bool
 	}{
-		{name: "simple query", input: "authentication", want: "authentication"},
-		{name: "multi word", input: "auth flow", want: "auth flow"},
-		{name: "strips parens", input: "func(x)", want: "func x"},
-		{name: "strips quotes", input: `"hello world"`, want: "hello world"},
-		{name: "strips asterisk", input: "auth*", want: "auth"},
-		{name: "strips colon", input: "project:foo", want: "project foo"},
-		{name: "strips plus minus", input: "+required -excluded", want: "required excluded"},
-		{name: "strips caret", input: "term^2", want: "term 2"},
-		{name: "collapses spaces", input: "a  b   c", want: "a b c"},
-		{name: "trims whitespace", input: "  hello  ", want: "hello"},
-		{name: "empty after sanitize", input: "???***", wantErr: true},
-		{name: "single quotes", input: "it's working", want: "it s working"},
-		{name: "mixed special chars", input: `search("hello":world*)`, want: "search hello world"},
+		{name: "one word", input: "authentication", want: `"authentication"`},
+		{name: "two words are ANDed", input: "auth flow", want: `"auth" AND "flow"`},
+		// The characters that used to be stripped, or to kill the query.
+		{name: "full stop", input: "V1.15", want: `"V1.15"`},
+		{name: "leading dash", input: "-j all", want: `"-j" AND "all"`},
+		{name: "plus signs", input: "C++ code", want: `"C++" AND "code"`},
+		{name: "path with a colon", input: "mcci/tools:bin", want: `"mcci/tools:bin"`},
+		{name: "parentheses", input: "func(x)", want: `"func(x)"`},
+		{name: "apostrophe", input: "it's working", want: `"it's" AND "working"`},
+		// A quote in the input is doubled, so it cannot end the string early.
+		{name: "embedded quote", input: `say "hi"`, want: `"say" AND """hi"""`},
+		{name: "collapses whitespace", input: "  a\t b  ", want: `"a" AND "b"`},
+		// Nothing to tokenize: dropped rather than quoted into an empty phrase.
+		{name: "punctuation only term", input: "auth -- flow", want: `"auth" AND "flow"`},
+		{name: "punctuation only query", input: "???***", wantErr: true},
+		{name: "empty", input: "   ", wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := sanitizeFTS5Query(tt.input)
+			got, err := fts5MatchExpr(tt.input)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("sanitizeFTS5Query(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				t.Errorf("fts5MatchExpr(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
 				return
 			}
 			if !tt.wantErr && got != tt.want {
-				t.Errorf("sanitizeFTS5Query(%q) = %q, want %q", tt.input, got, tt.want)
+				t.Errorf("fts5MatchExpr(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+// The failure this replaces: a full stop reached FTS5 and the search died
+// with a SQLite syntax error rather than returning anything.
+func TestSearchAcceptsPunctuation(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	_ = InsertSession(Session{
+		ID: "sess-1", Project: "proj", Tool: "claude", MessageCount: 1,
+		StartTime: time.Now().Add(-time.Hour),
+	})
+	_ = InsertMessage(Message{
+		SessionID: "sess-1", Project: "proj", Role: "user",
+		Content: "bsdmake V1.15 built the parallel tree with -j 8",
+	})
+
+	for _, query := range []string{"V1.15", "bsdmake V1.15", "-j 8", "C++", "mcci/tools:bin"} {
+		if _, err := SearchGrouped(query, 5); err != nil {
+			t.Errorf("SearchGrouped(%q) = %v, want no error", query, err)
+		}
+		if _, err := Search(query, 5); err != nil {
+			t.Errorf("Search(%q) = %v, want no error", query, err)
+		}
+	}
+
+	results, err := SearchGrouped("V1.15", 5)
+	if err != nil {
+		t.Fatalf("SearchGrouped: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("V1.15 found %d sessions, want the 1 holding it", len(results))
 	}
 }
 
