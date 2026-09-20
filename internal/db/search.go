@@ -201,6 +201,71 @@ func Search(query string, limit int) ([]SearchResult, error) {
 	return results, nil
 }
 
+// SearchFilter narrows a search to part of the corpus. An empty field does
+// not filter.
+//
+// Host and WorkingDirectory are the dependable way to say "the work done
+// there": Project is derived by each adapter with a heuristic, so a WSL
+// session keeps two path segments while a Windows one keeps a mangled full
+// path, and neither is predictable from the outside.
+type SearchFilter struct {
+	// Host matches the machine exactly, as `mnemo migrate host` lists them.
+	Host string
+	// WorkingDirectory matches any session whose directory contains this
+	// text, so a caller can pass a fragment of a long Windows path.
+	WorkingDirectory string
+	// Project matches any session whose derived project name contains this
+	// text, ignoring case. It used to be an exact match applied after the
+	// query, which turned a near miss into an empty result with no hint
+	// that the filter had done it.
+	Project string
+	// Roles limits which block types count as a hit: user, assistant,
+	// tool_use, tool_result or thinking. A tool_use hit is a command
+	// someone ran, not a conclusion anyone reached.
+	Roles []string
+	// Since keeps sessions that started on or after this date, written
+	// YYYY-MM-DD. The stored timestamps begin with that same fixed-width
+	// date, so a text comparison orders them correctly this far.
+	Since string
+}
+
+// sqlWhere renders the filter as SQL over the joined sessions row s and
+// message row m, and the values to bind.
+func (f SearchFilter) sqlWhere() (string, []any) {
+	var clauses []string
+	var args []any
+
+	if f.Host != "" && hasColumn("sessions", "host") {
+		clauses = append(clauses, "s.host = ?")
+		args = append(args, f.Host)
+	}
+	if f.WorkingDirectory != "" {
+		clauses = append(clauses, "COALESCE(s.working_directory, '') LIKE ?")
+		args = append(args, "%"+f.WorkingDirectory+"%")
+	}
+	if f.Project != "" {
+		clauses = append(clauses, "LOWER(s.project) LIKE LOWER(?)")
+		args = append(args, "%"+f.Project+"%")
+	}
+	if len(f.Roles) > 0 {
+		placeholders := make([]string, len(f.Roles))
+		for i, r := range f.Roles {
+			placeholders[i] = "?"
+			args = append(args, r)
+		}
+		clauses = append(clauses, "m.role IN ("+strings.Join(placeholders, ", ")+")")
+	}
+	if f.Since != "" {
+		clauses = append(clauses, "COALESCE(s.start_time, s.indexed_at, '') >= ?")
+		args = append(args, f.Since)
+	}
+
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return " AND " + strings.Join(clauses, " AND "), args
+}
+
 // GroupedSearch is what a session-level search found and how it found it.
 type GroupedSearch struct {
 	Matches []SessionMatch
@@ -219,8 +284,8 @@ type GroupedSearch struct {
 // message, which is the one thing that reliably finds nothing, so a strict
 // pass that comes back empty is retried as "any term". Which pass produced
 // the results is reported rather than left for the caller to assume.
-func SearchGroupedExplained(query string, limit int) (GroupedSearch, error) {
-	matches, err := searchGrouped(query, limit, MatchAll)
+func SearchGroupedExplained(query string, limit int, filter SearchFilter) (GroupedSearch, error) {
+	matches, err := searchGrouped(query, limit, MatchAll, filter)
 	if err != nil {
 		return GroupedSearch{}, err
 	}
@@ -228,7 +293,7 @@ func SearchGroupedExplained(query string, limit int) (GroupedSearch, error) {
 		return GroupedSearch{Matches: matches, Mode: MatchAll}, nil
 	}
 
-	loose, err := searchGrouped(query, limit, MatchAny)
+	loose, err := searchGrouped(query, limit, MatchAny, filter)
 	if err != nil {
 		return GroupedSearch{}, err
 	}
@@ -249,10 +314,10 @@ func SearchGroupedExplained(query string, limit int) (GroupedSearch, error) {
 // Fetches message-level FTS5 results, groups by session in Go, then
 // enriches with session metadata. Ranked by BM25 * temporal_decay * density_bonus.
 func SearchGrouped(query string, limit int) ([]SessionMatch, error) {
-	return searchGrouped(query, limit, MatchAll)
+	return searchGrouped(query, limit, MatchAll, SearchFilter{})
 }
 
-func searchGrouped(query string, limit int, mode MatchMode) ([]SessionMatch, error) {
+func searchGrouped(query string, limit int, mode MatchMode, filter SearchFilter) ([]SessionMatch, error) {
 	if limit <= 0 {
 		limit = 5
 	}
@@ -268,16 +333,24 @@ func searchGrouped(query string, limit int, mode MatchMode) ([]SessionMatch, err
 		fetchLimit = 50
 	}
 
-	rows, err := db.Query(`
+	// The sessions row is joined whether or not the filter needs it: the
+	// query already groups by session, and the join is what lets a caller
+	// narrow by machine or directory in SQL rather than after the fact.
+	where, filterArgs := filter.sqlWhere()
+	args := append([]any{safeQuery}, filterArgs...)
+	args = append(args, fetchLimit)
+
+	rows, err := db.Query(fmt.Sprintf(`
 		SELECT m.session_id, m.role,
 			   snippet(messages_fts, 0, '⟪', '⟫', '...', 64) as snippet,
 			   bm25(messages_fts) as rank
 		FROM messages_fts
 		JOIN messages m ON messages_fts.rowid = m.id
-		WHERE messages_fts MATCH ?
+		JOIN sessions s ON s.id = m.session_id
+		WHERE messages_fts MATCH ?%s
 		ORDER BY rank
 		LIMIT ?
-	`, safeQuery, fetchLimit)
+	`, where), args...)
 	if err != nil {
 		return nil, fmt.Errorf("grouped search failed: %w", err)
 	}

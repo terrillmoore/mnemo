@@ -55,10 +55,38 @@ type sessionHit struct {
 	SnippetRole *string `json:"snippet_role"`
 }
 
+// searchFilters echoes the filters a search ran under. Every field is
+// present, null where the caller asked for nothing, so an empty result can
+// be read without guessing what was applied.
+type searchFilters struct {
+	Host             *string  `json:"host"`
+	WorkingDirectory *string  `json:"working_directory"`
+	Project          *string  `json:"project"`
+	Roles            []string `json:"role"`
+	Since            *string  `json:"since"`
+}
+
+// newSearchFilters renders the filter for the wire.
+func newSearchFilters(f db.SearchFilter) searchFilters {
+	roles := f.Roles
+	if roles == nil {
+		roles = []string{}
+	}
+	return searchFilters{
+		Host:             optString(f.Host),
+		WorkingDirectory: optString(f.WorkingDirectory),
+		Project:          optString(f.Project),
+		Roles:            roles,
+		Since:            optString(f.Since),
+	}
+}
+
 // searchResponse answers mnemo_search.
 type searchResponse struct {
-	Query   string  `json:"query"`
-	Project *string `json:"project_filter"`
+	Query string `json:"query"`
+	// Filters echoes what narrowed the search, so a caller reading an empty
+	// result can see whether a filter caused it.
+	Filters searchFilters `json:"filters"`
 	// Mode says how the query was matched: "all" means every term had to
 	// appear in one message, "any" that this found nothing and the search
 	// widened to messages holding some of them. A sentence usually lands in
