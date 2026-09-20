@@ -33,6 +33,23 @@ Upstream's Homebrew tap and its GoReleaser workflow belong to
 `Pilan-AI/mnemo` and are not part of this path. `RELEASING.md` and
 `.github/workflows/release.yml` describe that flow, not ours.
 
+## Where to file a change request
+
+Open it at `mcci/tools/claude/mnemo` on gitlab-x, with `glab issue create`.
+That is where the code and the merge requests are, so an issue and its fix
+stay together, and it is the tracker a machine can actually reach: `glab` is
+authenticated to gitlab-x on the machines here and `gh` is not installed on
+most of them.
+
+An issue about the archive host, the Ansible role, keys or inventory goes to
+`mcci/sysadmin/infrastructure` instead, because that is where its fix lands.
+
+Do not open issues on `github.com/terrillmoore/mnemo`. That tracker is public
+and deliberately holds only what is generic. Writing up a failure means
+quoting a hostname, a path, or a line from a session, and deciding what is
+safe to publish is Terry's call, not an agent's: say in the gitlab-x issue
+that it looks worth sending upstream and leave it to him.
+
 ## Multi-machine archive
 
 This fork exists mainly to support one searchable history across several
