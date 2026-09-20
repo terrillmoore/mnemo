@@ -190,8 +190,9 @@ func TestSearchHandlerFiltersByProject(t *testing.T) {
 
 	got, _, _ := call(t, s, "mnemo_search", map[string]any{"query": "watchdog", "project": "standard-tools"})
 
-	if got["project_filter"] != "standard-tools" {
-		t.Errorf("project_filter = %v", got["project_filter"])
+	filters := got["filters"].(map[string]any)
+	if filters["project"] != "standard-tools" {
+		t.Errorf("filters.project = %v", filters["project"])
 	}
 	results := got["results"].([]any)
 	if len(results) != 1 {
@@ -199,6 +200,77 @@ func TestSearchHandlerFiltersByProject(t *testing.T) {
 	}
 	if p := results[0].(map[string]any)["project"]; p != "standard-tools" {
 		t.Errorf("project = %v, want standard-tools", p)
+	}
+}
+
+// Host and working directory are the dependable filters, and the reply
+// echoes what was applied so an empty result can be read without guessing.
+func TestSearchHandlerFiltersByMachineAndDirectory(t *testing.T) {
+	s := seedServer(t)
+
+	got, _, _ := call(t, s, "mnemo_search", map[string]any{
+		"query": "watchdog", "host": "mercury2-emb-ah3",
+	})
+	results := got["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("host filter returned %d results, want 1", len(results))
+	}
+	if h := results[0].(map[string]any)["host"]; h != "mercury2-emb-ah3" {
+		t.Errorf("host = %v", h)
+	}
+
+	// A fragment of the Windows path, which is what a caller has to hand.
+	got, _, _ = call(t, s, "mnemo_search", map[string]any{
+		"query": "watchdog", "working_directory": `ss\lora`,
+	})
+	results = got["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("working_directory filter returned %d results, want 1", len(results))
+	}
+	if h := results[0].(map[string]any)["host"]; h != "tmmnote15" {
+		t.Errorf("host = %v, want the session in that directory", h)
+	}
+
+	filters := got["filters"].(map[string]any)
+	if filters["working_directory"] == nil || filters["host"] != nil {
+		t.Errorf("filters = %#v, want the directory set and the host null", filters)
+	}
+}
+
+// A tool_use hit is a command someone ran, not a conclusion anyone reached,
+// so a caller can ask for the conversation alone.
+func TestSearchHandlerFiltersByRole(t *testing.T) {
+	s := seedServer(t)
+
+	got, _, _ := call(t, s, "mnemo_search", map[string]any{
+		"query": "watchdog", "role": []any{"assistant"},
+	})
+	results := got["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("role filter returned %d results, want the 1 session with an assistant row", len(results))
+	}
+	if r := results[0].(map[string]any)["snippet_role"]; r != "assistant" {
+		t.Errorf("snippet_role = %v, want assistant", r)
+	}
+}
+
+// The date is the fixed-width part of a stored timestamp, so the comparison
+// is safe even though the format varies after the seconds.
+func TestSearchHandlerFiltersBySince(t *testing.T) {
+	s := seedServer(t)
+
+	recent, _, _ := call(t, s, "mnemo_search", map[string]any{
+		"query": "watchdog", "since": time.Now().Add(-24 * time.Hour).Format("2006-01-02"),
+	})
+	if recent["count"] != float64(1) {
+		t.Errorf("since yesterday found %v sessions, want the 1 from an hour ago", recent["count"])
+	}
+
+	all, _, _ := call(t, s, "mnemo_search", map[string]any{
+		"query": "watchdog", "since": "2020-01-01",
+	})
+	if all["count"] != float64(2) {
+		t.Errorf("since 2020 found %v sessions, want both", all["count"])
 	}
 }
 

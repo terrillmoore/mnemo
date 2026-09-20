@@ -439,7 +439,7 @@ func TestSearchGroupedExplainedFallsBackToAnyTerm(t *testing.T) {
 		Content: "the oak-libs build wrote its objects under the parallel tree",
 	})
 
-	strict, err := SearchGroupedExplained("oak-libs objects", 5)
+	strict, err := SearchGroupedExplained("oak-libs objects", 5, SearchFilter{})
 	if err != nil {
 		t.Fatalf("SearchGroupedExplained: %v", err)
 	}
@@ -450,7 +450,7 @@ func TestSearchGroupedExplainedFallsBackToAnyTerm(t *testing.T) {
 		t.Errorf("terms without matches = %v, want none when the strict pass answered", strict.TermsWithoutMatches)
 	}
 
-	loose, err := SearchGroupedExplained("oak-libs objects elapsed compile errors", 5)
+	loose, err := SearchGroupedExplained("oak-libs objects elapsed compile errors", 5, SearchFilter{})
 	if err != nil {
 		t.Fatalf("SearchGroupedExplained: %v", err)
 	}
@@ -481,7 +481,7 @@ func TestSearchGroupedExplainedReportsStrictWhenNothingMatches(t *testing.T) {
 	_ = InsertSession(Session{ID: "sess-1", Project: "proj", Tool: "claude", MessageCount: 1})
 	_ = InsertMessage(Message{SessionID: "sess-1", Project: "proj", Role: "user", Content: "nothing to do with it"})
 
-	got, err := SearchGroupedExplained("zzqqxx yyzzww", 5)
+	got, err := SearchGroupedExplained("zzqqxx yyzzww", 5, SearchFilter{})
 	if err != nil {
 		t.Fatalf("SearchGroupedExplained: %v", err)
 	}

@@ -87,7 +87,20 @@ func newMCPServer() *server.MCPServer {
 			mcp.Description("Maximum number of results to return (default: 10)"),
 		),
 		mcp.WithString("project",
-			mcp.Description("Filter results by project name (optional)"),
+			mcp.Description("Only sessions whose project name contains this text, ignoring case. The project name is derived by each adapter with a heuristic; host and working_directory are dependable, this is not."),
+		),
+		mcp.WithString("host",
+			mcp.Description("Only sessions from this machine, named exactly, for an index holding several machines' history"),
+		),
+		mcp.WithString("working_directory",
+			mcp.Description("Only sessions whose working directory contains this text, so a fragment of a long path will do"),
+		),
+		mcp.WithArray("role",
+			mcp.Description("Only hits in these block types: user, assistant, tool_use, tool_result or thinking. A tool_use hit is a command someone ran, not a conclusion anyone reached."),
+			mcp.WithStringItems(),
+		),
+		mcp.WithString("since",
+			mcp.Description("Only sessions that started on or after this date, written YYYY-MM-DD"),
 		),
 	)
 
@@ -98,33 +111,24 @@ func newMCPServer() *server.MCPServer {
 		}
 
 		limit := request.GetInt("limit", 5)
-		projectFilter := request.GetString("project", "")
 
-		// When filtering by project, search with a higher limit to avoid missing
-		// relevant results that would be pushed beyond the limit threshold.
-		searchLimit := limit
-		if projectFilter != "" {
-			searchLimit = limit * 5
+		// Every filter is applied in SQL. The project filter used to run in
+		// Go after the query, as an exact case-insensitive match on a name
+		// the adapters derive inconsistently, so a near miss returned
+		// nothing and nothing said the filter had done it.
+		filter := db.SearchFilter{
+			Host:             request.GetString("host", ""),
+			WorkingDirectory: request.GetString("working_directory", ""),
+			Project:          request.GetString("project", ""),
+			Roles:            request.GetStringSlice("role", nil),
+			Since:            request.GetString("since", ""),
 		}
 
-		found, err := db.SearchGroupedExplained(query, searchLimit)
+		found, err := db.SearchGroupedExplained(query, limit, filter)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}
 		results := found.Matches
-
-		if projectFilter != "" {
-			filtered := make([]db.SessionMatch, 0, limit)
-			for _, r := range results {
-				if strings.EqualFold(r.Project, projectFilter) {
-					filtered = append(filtered, r)
-				}
-			}
-			results = filtered
-			if len(results) > limit {
-				results = results[:limit]
-			}
-		}
 
 		missing := found.TermsWithoutMatches
 		if missing == nil {
@@ -133,7 +137,7 @@ func newMCPServer() *server.MCPServer {
 
 		return mcp.NewToolResultJSON(searchResponse{
 			Query:               query,
-			Project:             optString(projectFilter),
+			Filters:             newSearchFilters(filter),
 			Mode:                string(found.Mode),
 			TermsWithoutMatches: missing,
 			Count:               len(results),
