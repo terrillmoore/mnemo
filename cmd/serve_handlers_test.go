@@ -454,3 +454,32 @@ func TestSessionHandlerRejectsAnUnknownSession(t *testing.T) {
 		t.Errorf("the error does not name the session: %q", text)
 	}
 }
+
+// A sentence asks for every word in one message. The reply says which match
+// produced the results and which words are not in the index at all, so the
+// caller can narrow instead of concluding the corpus is empty.
+func TestSearchHandlerSaysHowItMatched(t *testing.T) {
+	s := seedServer(t)
+
+	strict, _, _ := call(t, s, "mnemo_search", map[string]any{"query": "watchdog"})
+	if strict["mode"] != "all" {
+		t.Errorf("mode = %v, want all", strict["mode"])
+	}
+	if terms, ok := strict["terms_without_matches"].([]any); !ok || len(terms) != 0 {
+		t.Errorf("terms_without_matches = %#v, want [] when the strict pass answered", strict["terms_without_matches"])
+	}
+
+	loose, _, _ := call(t, s, "mnemo_search", map[string]any{
+		"query": "watchdog zzqqxx",
+	})
+	if loose["mode"] != "any" {
+		t.Errorf("mode = %v, want any once the strict pass found nothing", loose["mode"])
+	}
+	if loose["count"] == float64(0) {
+		t.Error("the fallback returned nothing; the corpus holds watchdog")
+	}
+	terms := loose["terms_without_matches"].([]any)
+	if len(terms) != 1 || terms[0] != "zzqqxx" {
+		t.Errorf("terms_without_matches = %#v, want the one word that is not in the index", terms)
+	}
+}

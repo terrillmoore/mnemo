@@ -107,10 +107,11 @@ func newMCPServer() *server.MCPServer {
 			searchLimit = limit * 5
 		}
 
-		results, err := db.SearchGrouped(query, searchLimit)
+		found, err := db.SearchGroupedExplained(query, searchLimit)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 		}
+		results := found.Matches
 
 		if projectFilter != "" {
 			filtered := make([]db.SessionMatch, 0, limit)
@@ -125,11 +126,18 @@ func newMCPServer() *server.MCPServer {
 			}
 		}
 
+		missing := found.TermsWithoutMatches
+		if missing == nil {
+			missing = []string{}
+		}
+
 		return mcp.NewToolResultJSON(searchResponse{
-			Query:   query,
-			Project: optString(projectFilter),
-			Count:   len(results),
-			Results: newSessionHits(results),
+			Query:               query,
+			Project:             optString(projectFilter),
+			Mode:                string(found.Mode),
+			TermsWithoutMatches: missing,
+			Count:               len(results),
+			Results:             newSessionHits(results),
 		})
 	})
 

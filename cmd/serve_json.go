@@ -57,10 +57,19 @@ type sessionHit struct {
 
 // searchResponse answers mnemo_search.
 type searchResponse struct {
-	Query   string       `json:"query"`
-	Project *string      `json:"project_filter"`
-	Count   int          `json:"count"`
-	Results []sessionHit `json:"results"`
+	Query   string  `json:"query"`
+	Project *string `json:"project_filter"`
+	// Mode says how the query was matched: "all" means every term had to
+	// appear in one message, "any" that this found nothing and the search
+	// widened to messages holding some of them. A sentence usually lands in
+	// "any", and its results are looser than the caller may assume.
+	Mode string `json:"mode"`
+	// TermsWithoutMatches holds the words that appear nowhere in the index,
+	// so a caller can drop them rather than guess which one spoiled the
+	// query. Empty unless matching every term found nothing.
+	TermsWithoutMatches []string     `json:"terms_without_matches"`
+	Count               int          `json:"count"`
+	Results             []sessionHit `json:"results"`
 }
 
 // contextResponse answers mnemo_context.

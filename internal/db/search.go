@@ -4,6 +4,7 @@
 package db
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"math"
@@ -75,6 +76,35 @@ func sessionsRecordHost() bool {
 // A term holding no letter or digit is dropped rather than quoted: it would
 // tokenize to nothing, and an empty phrase is not a useful thing to AND.
 func fts5MatchExpr(query string) (string, error) {
+	return fts5MatchExprMode(query, MatchAll)
+}
+
+// MatchMode says whether every term has to appear in one message or any of
+// them will do.
+type MatchMode string
+
+const (
+	MatchAll MatchMode = "all"
+	MatchAny MatchMode = "any"
+)
+
+// fts5MatchExprMode builds the MATCH expression for one mode.
+func fts5MatchExprMode(query string, mode MatchMode) (string, error) {
+	terms := fts5Terms(query)
+	if len(terms) == 0 {
+		return "", fmt.Errorf("search query has no word to match on (original: %q)", query)
+	}
+
+	joiner := " AND "
+	if mode == MatchAny {
+		joiner = " OR "
+	}
+	return strings.Join(terms, joiner), nil
+}
+
+// fts5Terms quotes each term of a query, dropping any FTS5 would tokenize to
+// nothing.
+func fts5Terms(query string) []string {
 	var terms []string
 	for _, field := range strings.Fields(query) {
 		if !hasWordCharacter(field) {
@@ -82,12 +112,33 @@ func fts5MatchExpr(query string) (string, error) {
 		}
 		terms = append(terms, `"`+strings.ReplaceAll(field, `"`, `""`)+`"`)
 	}
+	return terms
+}
 
-	if len(terms) == 0 {
-		return "", fmt.Errorf("search query has no word to match on (original: %q)", query)
+// termsWithoutMatches reports which of a query's terms appear nowhere in the
+// index, spelled as the caller typed them. A caller whose nine-word sentence
+// found nothing can then drop the two words that were never going to match
+// instead of guessing which.
+func termsWithoutMatches(query string) []string {
+	var missing []string
+	fields := strings.Fields(query)
+	kept := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if hasWordCharacter(f) {
+			kept = append(kept, f)
+		}
 	}
 
-	return strings.Join(terms, " AND "), nil
+	for i, term := range fts5Terms(query) {
+		var one int
+		err := db.QueryRow(
+			`SELECT 1 FROM messages_fts WHERE messages_fts MATCH ? LIMIT 1`, term,
+		).Scan(&one)
+		if err == sql.ErrNoRows {
+			missing = append(missing, kept[i])
+		}
+	}
+	return missing
 }
 
 // hasWordCharacter reports whether s holds anything FTS5 would tokenize.
@@ -150,15 +201,63 @@ func Search(query string, limit int) ([]SearchResult, error) {
 	return results, nil
 }
 
+// GroupedSearch is what a session-level search found and how it found it.
+type GroupedSearch struct {
+	Matches []SessionMatch
+	// Mode is the match that produced the results: "all" when every term had
+	// to appear in one message, "any" when that found nothing and the search
+	// fell back to matching some of them.
+	Mode MatchMode
+	// TermsWithoutMatches lists terms that appear nowhere in the index.
+	// Filled in only when the strict pass found nothing, since that is when
+	// a caller needs to know which word to drop.
+	TermsWithoutMatches []string
+}
+
+// SearchGroupedExplained runs the session-level search and says how it
+// answered. A question written as a sentence asks for every word in one
+// message, which is the one thing that reliably finds nothing, so a strict
+// pass that comes back empty is retried as "any term". Which pass produced
+// the results is reported rather than left for the caller to assume.
+func SearchGroupedExplained(query string, limit int) (GroupedSearch, error) {
+	matches, err := searchGrouped(query, limit, MatchAll)
+	if err != nil {
+		return GroupedSearch{}, err
+	}
+	if len(matches) > 0 {
+		return GroupedSearch{Matches: matches, Mode: MatchAll}, nil
+	}
+
+	loose, err := searchGrouped(query, limit, MatchAny)
+	if err != nil {
+		return GroupedSearch{}, err
+	}
+	result := GroupedSearch{
+		Matches:             loose,
+		Mode:                MatchAny,
+		TermsWithoutMatches: termsWithoutMatches(query),
+	}
+	if len(loose) == 0 {
+		// Nothing either way. Reporting "any" would suggest the fallback
+		// widened something; it did not.
+		result.Mode = MatchAll
+	}
+	return result, nil
+}
+
 // SearchGrouped performs a session-level search with intelligent ranking.
 // Fetches message-level FTS5 results, groups by session in Go, then
 // enriches with session metadata. Ranked by BM25 * temporal_decay * density_bonus.
 func SearchGrouped(query string, limit int) ([]SessionMatch, error) {
+	return searchGrouped(query, limit, MatchAll)
+}
+
+func searchGrouped(query string, limit int, mode MatchMode) ([]SessionMatch, error) {
 	if limit <= 0 {
 		limit = 5
 	}
 
-	safeQuery, err := fts5MatchExpr(query)
+	safeQuery, err := fts5MatchExprMode(query, mode)
 	if err != nil {
 		return nil, err
 	}
