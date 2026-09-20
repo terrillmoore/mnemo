@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,23 +38,24 @@ func seedServer(t *testing.T) *server.MCPServer {
 	t.Cleanup(func() { db.SetHost(saved) })
 
 	now := time.Now()
+	type row struct{ role, content string }
 	sessions := []struct {
 		id, project, firstQuery, workdir, host string
 		age                                    time.Duration
-		messages                               []string
+		messages                               []row
 	}{
 		{
 			id: "sess-1", project: "lora-bootloader", firstQuery: "why does the second stage hang",
 			workdir: `C:\ss\lora-bootloader`, host: "tmmnote15", age: time.Hour,
-			messages: []string{
-				"The second stage hangs waiting for the watchdog.",
-				"Disable the watchdog and the second stage boots.",
+			messages: []row{
+				{"user", "The second stage hangs waiting for the watchdog."},
+				{"assistant", "Disable the watchdog and the second stage boots."},
 			},
 		},
 		{
 			id: "sess-2", project: "standard-tools", firstQuery: "bsdmake parallel jobs",
 			workdir: "/home/tmm/ss", host: "mercury2-emb-ah3", age: 48 * time.Hour,
-			messages: []string{"The watchdog is unrelated to bsdmake."},
+			messages: []row{{"user", "The watchdog is unrelated to bsdmake."}},
 		},
 	}
 
@@ -66,9 +68,9 @@ func seedServer(t *testing.T) *server.MCPServer {
 		}); err != nil {
 			t.Fatalf("seeding %s: %v", s.id, err)
 		}
-		for _, content := range s.messages {
+		for _, m := range s.messages {
 			if err := db.InsertMessage(db.Message{
-				SessionID: s.id, Project: s.project, Role: "user", Content: content,
+				SessionID: s.id, Project: s.project, Role: m.role, Content: m.content,
 			}); err != nil {
 				t.Fatalf("seeding a message of %s: %v", s.id, err)
 			}
@@ -333,14 +335,15 @@ func TestRepliesSatisfyTheirPublishedSchema(t *testing.T) {
 	if err := json.Unmarshal(listed, &envelope); err != nil {
 		t.Fatalf("reading tools/list: %v", err)
 	}
-	if len(envelope.Result.Tools) != 4 {
-		t.Fatalf("tools/list returned %d tools, want 4", len(envelope.Result.Tools))
+	if len(envelope.Result.Tools) != 5 {
+		t.Fatalf("tools/list returned %d tools, want 5", len(envelope.Result.Tools))
 	}
 
 	arguments := map[string]map[string]any{
 		"mnemo_search":  {"query": "watchdog"},
 		"mnemo_context": {"project": "lora-bootloader"},
 		"mnemo_recent":  {"limit": 2},
+		"mnemo_session": {"session_id": "sess-1"},
 		"mnemo_tools":   {},
 	}
 
@@ -371,5 +374,83 @@ func TestRepliesSatisfyTheirPublishedSchema(t *testing.T) {
 				t.Errorf("the reply does not satisfy the published schema: %v", err)
 			}
 		})
+	}
+}
+
+// The point of the tool: a caller that holds no transcripts finds a session
+// by searching and then reads it, without going to the machine it ran on.
+func TestSessionHandlerReadsTheConversation(t *testing.T) {
+	s := seedServer(t)
+
+	got, text, isErr := call(t, s, "mnemo_session", map[string]any{"session_id": "sess-1"})
+	if isErr {
+		t.Fatalf("session reported an error: %s", text)
+	}
+
+	if got["session_id"] != "sess-1" || got["host"] != "tmmnote15" {
+		t.Errorf("session_id %v, host %v", got["session_id"], got["host"])
+	}
+	if got["working_directory"] == nil {
+		t.Error("working_directory is null; the row records one")
+	}
+
+	messages := got["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("returned %d messages, want the 2 seeded", len(messages))
+	}
+	first := messages[0].(map[string]any)
+	if first["role"] != "user" {
+		t.Errorf("first role = %v", first["role"])
+	}
+	if first["content"] == "" || first["content"] == nil {
+		t.Error("a message came back with no content")
+	}
+	if got["has_more"] != false {
+		t.Errorf("has_more = %v with the whole session returned", got["has_more"])
+	}
+}
+
+// Asking for tool rows is how a caller reads what a command printed, and it
+// is not the default because those rows are far larger than the talk.
+func TestSessionHandlerHonoursRolesAndPaging(t *testing.T) {
+	s := seedServer(t)
+
+	got, _, _ := call(t, s, "mnemo_session", map[string]any{
+		"session_id": "sess-1",
+		"roles":      []any{"user"},
+		"limit":      1,
+	})
+
+	if got["total"] != float64(1) {
+		t.Errorf("total = %v, want the 1 user row", got["total"])
+	}
+	messages := got["messages"].([]any)
+	if len(messages) != 1 || messages[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("messages = %#v", messages)
+	}
+
+	// Two rows in the conversation, one at a time.
+	page, _, _ := call(t, s, "mnemo_session", map[string]any{
+		"session_id": "sess-1", "limit": 1, "offset": 0,
+	})
+	if page["has_more"] != true {
+		t.Errorf("has_more = %v on the first of two rows", page["has_more"])
+	}
+	if page["returned"] != float64(1) || page["total"] != float64(2) {
+		t.Errorf("returned %v of total %v", page["returned"], page["total"])
+	}
+}
+
+// An id from another machine's index, or a typo, is worth saying plainly
+// rather than answering with an empty session.
+func TestSessionHandlerRejectsAnUnknownSession(t *testing.T) {
+	s := seedServer(t)
+
+	_, text, isErr := call(t, s, "mnemo_session", map[string]any{"session_id": "no-such-session"})
+	if !isErr {
+		t.Fatalf("an unknown session should be an error result; got %q", text)
+	}
+	if !strings.Contains(text, "no-such-session") {
+		t.Errorf("the error does not name the session: %q", text)
 	}
 }

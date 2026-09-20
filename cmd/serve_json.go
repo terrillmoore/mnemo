@@ -109,6 +109,87 @@ type toolsResponse struct {
 	Tools     []toolEntry `json:"tools"`
 }
 
+// sessionMessage is one row of a transcript on the wire.
+type sessionMessage struct {
+	ID int64 `json:"id"`
+	// Role is the block type the adapter recorded: user, assistant,
+	// tool_use, tool_result or thinking. A tool_result hit is command
+	// output or a file, not something anyone said.
+	Role      string  `json:"role"`
+	Content   string  `json:"content"`
+	Timestamp *string `json:"timestamp"`
+	// Agent holds the parent session's id when this row belongs to a
+	// subagent transcript, null otherwise.
+	Agent *string `json:"agent"`
+}
+
+// sessionResponse answers mnemo_session: the session's own fields, so a
+// caller arriving with nothing but an id learns where it ran, and one page
+// of its rows.
+type sessionResponse struct {
+	SessionID        string  `json:"session_id"`
+	Host             *string `json:"host"`
+	Project          string  `json:"project"`
+	WorkingDirectory *string `json:"working_directory"`
+	Tool             string  `json:"tool"`
+	FirstQuery       *string `json:"first_query"`
+	StartedAt        *string `json:"started_at"`
+	EndedAt          *string `json:"ended_at"`
+	AgeDays          *int    `json:"age_days"`
+	// MessageCount is every row the session holds, of any role. Total is
+	// how many match the roles asked for, and the page is Offset to
+	// Offset+Returned of those.
+	MessageCount int              `json:"message_count"`
+	Roles        []string         `json:"roles"`
+	Total        int              `json:"total"`
+	Offset       int              `json:"offset"`
+	Limit        int              `json:"limit"`
+	Returned     int              `json:"returned"`
+	HasMore      bool             `json:"has_more"`
+	Messages     []sessionMessage `json:"messages"`
+}
+
+// newSessionMessages converts a page of rows for the wire. The slice is
+// never nil, so a page past the end marshals as [] rather than null.
+func newSessionMessages(rows []db.SessionMessage) []sessionMessage {
+	out := make([]sessionMessage, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, sessionMessage{
+			ID:        r.ID,
+			Role:      r.Role,
+			Content:   r.Content,
+			Timestamp: rfc3339UTC(r.Timestamp),
+			Agent:     optString(r.Agent),
+		})
+	}
+	return out
+}
+
+// newSessionResponse assembles the reply from the session, the page, and
+// what was asked for.
+func newSessionResponse(s db.SessionDetail, roles []string, total, offset, limit int, rows []db.SessionMessage) sessionResponse {
+	messages := newSessionMessages(rows)
+	return sessionResponse{
+		SessionID:        s.ID,
+		Host:             optString(s.Host),
+		Project:          s.Project,
+		WorkingDirectory: optString(s.WorkingDirectory),
+		Tool:             s.Tool,
+		FirstQuery:       optString(s.FirstQuery),
+		StartedAt:        rfc3339UTC(s.StartTime),
+		EndedAt:          rfc3339UTC(s.EndTime),
+		AgeDays:          ageDays(s.StartTime),
+		MessageCount:     s.MessageCount,
+		Roles:            roles,
+		Total:            total,
+		Offset:           offset,
+		Limit:            limit,
+		Returned:         len(messages),
+		HasMore:          offset+len(messages) < total,
+		Messages:         messages,
+	}
+}
+
 // optString returns a pointer to s, or nil when s is empty, so a field the
 // database does not record marshals as null rather than as an empty string
 // a caller might read as a value.
