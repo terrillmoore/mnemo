@@ -102,6 +102,11 @@ publish:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       when: manual
     - when: never
+  # A manual job declared under rules: blocks the pipeline until someone
+  # runs it, unless it is allowed to fail. Most pipelines publish nothing,
+  # and a pipeline waiting forever for a button nobody meant to press
+  # reports "blocked" rather than "passed".
+  allow_failure: true
   # Two publishes of the same version would race to overwrite each other.
   resource_group: publish
   interruptible: false
@@ -129,6 +134,9 @@ mirror:github:
   variables:
     GIT_STRATEGY: clone
     GIT_DEPTH: "0"
+  # Copying main to GitHub has nothing to do with publishing a build, so it
+  # does not queue behind the publish stage and its button.
+  needs: []
   resource_group: mirror
   before_script:
     - test -n "$GITHUB_MIRROR_SSH_KEY_B64" || { echo "GITHUB_MIRROR_SSH_KEY_B64 is not set (protected CI variable; the default branch and tags only)"; exit 1; }
