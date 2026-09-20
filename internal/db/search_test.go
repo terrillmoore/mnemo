@@ -422,3 +422,76 @@ func TestSearchGroupedReportsTheWorkingDirectory(t *testing.T) {
 		t.Errorf("WorkingDirectory = %q, want %q", got, want)
 	}
 }
+
+// A question written as a sentence asks for every word in one message, which
+// is the one thing that reliably finds nothing. The search says so rather
+// than answering "no results" to a corpus that holds the answer.
+func TestSearchGroupedExplainedFallsBackToAnyTerm(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	_ = InsertSession(Session{
+		ID: "sess-1", Project: "proj", Tool: "claude", MessageCount: 1,
+		StartTime: time.Now().Add(-time.Hour),
+	})
+	_ = InsertMessage(Message{
+		SessionID: "sess-1", Project: "proj", Role: "user",
+		Content: "the oak-libs build wrote its objects under the parallel tree",
+	})
+
+	strict, err := SearchGroupedExplained("oak-libs objects", 5)
+	if err != nil {
+		t.Fatalf("SearchGroupedExplained: %v", err)
+	}
+	if strict.Mode != MatchAll || len(strict.Matches) != 1 {
+		t.Errorf("mode %q with %d matches, want all with 1", strict.Mode, len(strict.Matches))
+	}
+	if len(strict.TermsWithoutMatches) != 0 {
+		t.Errorf("terms without matches = %v, want none when the strict pass answered", strict.TermsWithoutMatches)
+	}
+
+	loose, err := SearchGroupedExplained("oak-libs objects elapsed compile errors", 5)
+	if err != nil {
+		t.Fatalf("SearchGroupedExplained: %v", err)
+	}
+	if loose.Mode != MatchAny {
+		t.Errorf("mode = %q, want any once the strict pass found nothing", loose.Mode)
+	}
+	if len(loose.Matches) != 1 {
+		t.Errorf("found %d matches, want the 1 session holding some of the words", len(loose.Matches))
+	}
+	want := map[string]bool{"elapsed": true, "compile": true, "errors": true}
+	for _, term := range loose.TermsWithoutMatches {
+		if !want[term] {
+			t.Errorf("reported %q as unmatched; it is in the corpus", term)
+		}
+		delete(want, term)
+	}
+	if len(want) != 0 {
+		t.Errorf("did not report these as unmatched: %v", want)
+	}
+}
+
+// Nothing either way: reporting "any" would suggest the fallback widened
+// something, and it did not.
+func TestSearchGroupedExplainedReportsStrictWhenNothingMatches(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	_ = InsertSession(Session{ID: "sess-1", Project: "proj", Tool: "claude", MessageCount: 1})
+	_ = InsertMessage(Message{SessionID: "sess-1", Project: "proj", Role: "user", Content: "nothing to do with it"})
+
+	got, err := SearchGroupedExplained("zzqqxx yyzzww", 5)
+	if err != nil {
+		t.Fatalf("SearchGroupedExplained: %v", err)
+	}
+	if len(got.Matches) != 0 {
+		t.Fatalf("found %d matches, want none", len(got.Matches))
+	}
+	if got.Mode != MatchAll {
+		t.Errorf("mode = %q, want all when neither pass found anything", got.Mode)
+	}
+	if len(got.TermsWithoutMatches) != 2 {
+		t.Errorf("terms without matches = %v, want both", got.TermsWithoutMatches)
+	}
+}
