@@ -555,3 +555,55 @@ func TestSearchHandlerSaysHowItMatched(t *testing.T) {
 		t.Errorf("terms_without_matches = %#v, want the one word that is not in the index", terms)
 	}
 }
+
+// The snippet width is the caller's to choose, within reason: past the cap,
+// fetching the session with mnemo_session is cheaper and complete.
+func TestSearchHandlerWidensTheSnippet(t *testing.T) {
+	s := seedServer(t)
+
+	narrow, _, _ := call(t, s, "mnemo_search", map[string]any{
+		"query": "watchdog", "snippet_tokens": 4,
+	})
+	wide, _, _ := call(t, s, "mnemo_search", map[string]any{
+		"query": "watchdog", "snippet_tokens": 64,
+	})
+
+	short := narrow["results"].([]any)[0].(map[string]any)["snippet"].(string)
+	long := wide["results"].([]any)[0].(map[string]any)["snippet"].(string)
+	if len(short) >= len(long) {
+		t.Errorf("4 tokens gave %d bytes, 64 gave %d; the parameter did nothing", len(short), len(long))
+	}
+
+	// Above the cap the search still answers, with the cap applied.
+	huge, _, isErr := call(t, s, "mnemo_search", map[string]any{
+		"query": "watchdog", "snippet_tokens": 100000,
+	})
+	if isErr {
+		t.Error("an oversized snippet_tokens should be capped, not refused")
+	}
+	if huge["count"] == float64(0) {
+		t.Error("the capped search returned nothing")
+	}
+}
+
+// A raw BM25 score means nothing to a reader; its position in the ordering
+// does.
+func TestSearchHandlerRanksHitsFromOne(t *testing.T) {
+	s := seedServer(t)
+
+	got, _, _ := call(t, s, "mnemo_search", map[string]any{"query": "watchdog"})
+
+	results := got["results"].([]any)
+	if len(results) != 2 {
+		t.Fatalf("returned %d results, want 2", len(results))
+	}
+	for i, hit := range results {
+		h := hit.(map[string]any)
+		if h["rank"] != float64(i+1) {
+			t.Errorf("result %d has rank %v", i, h["rank"])
+		}
+		if _, present := h["score"]; present {
+			t.Error("score is still in the reply")
+		}
+	}
+}
