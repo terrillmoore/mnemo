@@ -171,6 +171,57 @@ func newMCPServer() *server.MCPServer {
 		})
 	})
 
+	// Search says which session answers a question; this reads the answer.
+	// It matters most for a caller that holds no transcripts: the archive is
+	// the durable copy of sessions whose files were deleted long ago.
+	sessionTool := mcp.NewTool("mnemo_session",
+		mcp.WithDescription("Read the messages of one past session, by the session_id a search returned"),
+		mcp.WithOutputSchema[sessionResponse](),
+		mcp.WithString("session_id",
+			mcp.Required(),
+			mcp.Description("The session to read, as mnemo_search reports it"),
+		),
+		mcp.WithArray("roles",
+			mcp.Description("Which block types to return; the conversation (user, assistant) by default. The others are tool_use, tool_result and thinking, and a full transcript with tool results is very large."),
+			mcp.WithStringItems(),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Rows to return (default: 50)"),
+		),
+		mcp.WithNumber("offset",
+			mcp.Description("Rows to skip, for reading a long session a page at a time (default: 0)"),
+		),
+	)
+
+	s.AddTool(sessionTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		sessionID, err := request.RequireString("session_id")
+		if err != nil {
+			return mcp.NewToolResultError("session_id parameter is required"), nil
+		}
+
+		roles := request.GetStringSlice("roles", []string{"user", "assistant"})
+		limit := request.GetInt("limit", 50)
+		offset := request.GetInt("offset", 0)
+
+		session, found, err := db.GetSession(sessionID)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("reading the session failed: %v", err)), nil
+		}
+		if !found {
+			// A miss is worth distinguishing from an empty session: the id
+			// may be from another machine's index, or from a database this
+			// server is not pointed at.
+			return mcp.NewToolResultError(fmt.Sprintf("no session %q in this index", sessionID)), nil
+		}
+
+		messages, total, err := db.GetSessionMessages(sessionID, roles, limit, offset)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("reading the session's messages failed: %v", err)), nil
+		}
+
+		return mcp.NewToolResultJSON(newSessionResponse(session, roles, total, offset, limit, messages))
+	})
+
 	recentTool := mcp.NewTool("mnemo_recent",
 		mcp.WithDescription("Show recent AI coding sessions"),
 		mcp.WithOutputSchema[recentResponse](),

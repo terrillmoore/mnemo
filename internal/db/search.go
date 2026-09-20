@@ -53,11 +53,7 @@ type SessionMatch struct {
 // ever written by upstream mnemo does not have it, and a read-only open
 // cannot add one.
 func sessionsRecordHost() bool {
-	var n int
-	err := db.QueryRow(
-		`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'host'`,
-	).Scan(&n)
-	return err == nil && n > 0
+	return hasColumn("sessions", "host")
 }
 
 // sanitizeFTS5Query strips FTS5 special characters to prevent query syntax errors.
