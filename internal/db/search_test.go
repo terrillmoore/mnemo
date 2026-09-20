@@ -495,3 +495,50 @@ func TestSearchGroupedExplainedReportsStrictWhenNothingMatches(t *testing.T) {
 		t.Errorf("terms without matches = %v, want both", got.TermsWithoutMatches)
 	}
 }
+
+// A term repeated hundreds of times in one transcript used to fill the fetch
+// of best rows, and every other session holding it was never seen. Grouping
+// in SQL means the loud session takes one place in the results, not all of
+// them.
+func TestSearchGroupedDoesNotLetOneSessionCrowdOthersOut(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// One session that says "watchdog" 200 times.
+	_ = InsertSession(Session{
+		ID: "loud", Project: "proj-loud", Tool: "claude", MessageCount: 200,
+		StartTime: time.Now().Add(-time.Hour),
+	})
+	for i := 0; i < 200; i++ {
+		_ = InsertMessage(Message{
+			SessionID: "loud", Project: "proj-loud", Role: "user",
+			Content: "the watchdog fired again",
+		})
+	}
+
+	// Three that mention it once.
+	for _, id := range []string{"quiet-1", "quiet-2", "quiet-3"} {
+		_ = InsertSession(Session{
+			ID: id, Project: "proj-" + id, Tool: "claude", MessageCount: 1,
+			StartTime: time.Now().Add(-2 * time.Hour),
+		})
+		_ = InsertMessage(Message{
+			SessionID: id, Project: "proj-" + id, Role: "user",
+			Content: "the watchdog is mentioned here once",
+		})
+	}
+
+	results, err := SearchGrouped("watchdog", 10)
+	if err != nil {
+		t.Fatalf("SearchGrouped: %v", err)
+	}
+	if len(results) != 4 {
+		t.Fatalf("found %d sessions, want all 4", len(results))
+	}
+
+	for _, r := range results {
+		if r.SessionID == "loud" && r.MatchCount != 200 {
+			t.Errorf("the loud session reports %d hits, want the real 200", r.MatchCount)
+		}
+	}
+}

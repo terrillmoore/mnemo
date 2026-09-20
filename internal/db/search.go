@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -277,6 +278,10 @@ type GroupedSearch struct {
 	// Filled in only when the strict pass found nothing, since that is when
 	// a caller needs to know which word to drop.
 	TermsWithoutMatches []string
+	// SkippedSessions counts sessions that matched but whose own row could
+	// not be read, so a caller is told the results are short rather than
+	// being handed a quietly truncated answer.
+	SkippedSessions int
 }
 
 // SearchGroupedExplained runs the session-level search and says how it
@@ -291,21 +296,22 @@ func SearchGroupedExplained(query string, limit int, filter SearchFilter) (Group
 // SearchGroupedWithSnippet is SearchGroupedExplained with the snippet width
 // named. snippetTokens of 0 takes the default.
 func SearchGroupedWithSnippet(query string, limit int, filter SearchFilter, snippetTokens int) (GroupedSearch, error) {
-	matches, err := searchGroupedSnippet(query, limit, MatchAll, filter, snippetTokens)
+	matches, skipped, err := searchGroupedSnippet(query, limit, MatchAll, filter, snippetTokens)
 	if err != nil {
 		return GroupedSearch{}, err
 	}
 	if len(matches) > 0 {
-		return GroupedSearch{Matches: matches, Mode: MatchAll}, nil
+		return GroupedSearch{Matches: matches, Mode: MatchAll, SkippedSessions: skipped}, nil
 	}
 
-	loose, err := searchGroupedSnippet(query, limit, MatchAny, filter, snippetTokens)
+	loose, looseSkipped, err := searchGroupedSnippet(query, limit, MatchAny, filter, snippetTokens)
 	if err != nil {
 		return GroupedSearch{}, err
 	}
 	result := GroupedSearch{
 		Matches:             loose,
 		Mode:                MatchAny,
+		SkippedSessions:     skipped + looseSkipped,
 		TermsWithoutMatches: termsWithoutMatches(query),
 	}
 	if len(loose) == 0 {
@@ -324,7 +330,8 @@ func SearchGrouped(query string, limit int) ([]SessionMatch, error) {
 }
 
 func searchGrouped(query string, limit int, mode MatchMode, filter SearchFilter) ([]SessionMatch, error) {
-	return searchGroupedSnippet(query, limit, mode, filter, 0)
+	matches, _, err := searchGroupedSnippet(query, limit, mode, filter, 0)
+	return matches, err
 }
 
 // DefaultSnippetTokens is how much of a matching message comes back when the
@@ -336,7 +343,7 @@ const DefaultSnippetTokens = 64
 // session is both cheaper and complete.
 const MaxSnippetTokens = 256
 
-func searchGroupedSnippet(query string, limit int, mode MatchMode, filter SearchFilter, snippetTokens int) ([]SessionMatch, error) {
+func searchGroupedSnippet(query string, limit int, mode MatchMode, filter SearchFilter, snippetTokens int) ([]SessionMatch, int, error) {
 	if limit <= 0 {
 		limit = 5
 	}
@@ -349,155 +356,160 @@ func searchGroupedSnippet(query string, limit int, mode MatchMode, filter Search
 
 	safeQuery, err := fts5MatchExprMode(query, mode)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	// Fetch message-level results with higher limit for session grouping
-	fetchLimit := limit * 10
-	if fetchLimit < 50 {
-		fetchLimit = 50
+	// Grouping happens in SQL, over every matching row.
+	//
+	// It used to happen in Go over the best `limit * 10` rows, which let one
+	// session crowd out the rest: a term appearing three hundred times in
+	// one transcript filled the fetch, and sessions that also held it were
+	// never seen. The counts were wrong for the same reason, since they
+	// counted the rows fetched rather than the rows that matched.
+	//
+	// The CTE is MATERIALIZED because FTS5's bm25() and snippet() only work
+	// in the query that reads the table directly, and SQLite would otherwise
+	// flatten the CTE into the aggregate and refuse. Measured on the 113 MB
+	// archive: 0.04s for an ordinary word, 0.64s for "the".
+	//
+	// More sessions are taken than asked for, because the composite score
+	// below can reorder them, and trimming to `limit` before scoring would
+	// drop a session the caller should have seen.
+	sessionLimit := limit * 3
+	if sessionLimit < 15 {
+		sessionLimit = 15
 	}
 
-	// The sessions row is joined whether or not the filter needs it: the
-	// query already groups by session, and the join is what lets a caller
-	// narrow by machine or directory in SQL rather than after the fact.
 	where, filterArgs := filter.sqlWhere()
 	args := append([]any{snippetTokens, safeQuery}, filterArgs...)
-	args = append(args, fetchLimit)
+	args = append(args, sessionLimit)
 
 	rows, err := db.Query(fmt.Sprintf(`
-		SELECT m.session_id, m.role,
-			   snippet(messages_fts, 0, '⟪', '⟫', '...', ?) as snippet,
-			   bm25(messages_fts) as rank
-		FROM messages_fts
-		JOIN messages m ON messages_fts.rowid = m.id
-		JOIN sessions s ON s.id = m.session_id
-		WHERE messages_fts MATCH ?%s
-		ORDER BY rank
+		WITH hits AS MATERIALIZED (
+			SELECT m.session_id AS sid, m.role AS role,
+				   bm25(messages_fts) AS rank,
+				   snippet(messages_fts, 0, '⟪', '⟫', '...', ?) AS snip
+			FROM messages_fts
+			JOIN messages m ON messages_fts.rowid = m.id
+			JOIN sessions s ON s.id = m.session_id
+			WHERE messages_fts MATCH ?%s
+		),
+		best AS (
+			SELECT sid, role, snip, rank,
+				   ROW_NUMBER() OVER (
+					   PARTITION BY sid ORDER BY (role = 'user') DESC, rank
+				   ) AS rn
+			FROM hits
+		)
+		SELECT h.sid,
+			   COUNT(*) AS match_count,
+			   SUM(CASE WHEN h.role = 'user' THEN 1 ELSE 0 END) AS user_hits,
+			   MIN(h.rank) AS best_rank,
+			   b.role, b.snip
+		FROM hits h
+		JOIN best b ON b.sid = h.sid AND b.rn = 1
+		GROUP BY h.sid
+		ORDER BY best_rank
 		LIMIT ?
 	`, where), args...)
 	if err != nil {
-		return nil, fmt.Errorf("grouped search failed: %w", err)
+		return nil, 0, fmt.Errorf("searching for %q: %w", query, err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	// Group by session in Go
-	type sessionData struct {
-		matchCount      int
-		bestRank        float64
-		userHits        int
-		bestSnippet     string
-		bestSnippetRole string
-		bestSnippetRank float64
-		bestSnippetUser bool
+	type grouped struct {
+		id          string
+		matchCount  int
+		userHits    int
+		bestRank    float64
+		snippet     string
+		snippetRole string
 	}
-	sessions := make(map[string]*sessionData)
-	var order []string
 
+	var found []grouped
 	for rows.Next() {
-		var sessionID, role, snippet string
-		var rank float64
-		if err := rows.Scan(&sessionID, &role, &snippet, &rank); err != nil {
-			log.Printf("SearchGrouped: rows.Scan error: %v", err)
-			continue
+		var g grouped
+		if err := rows.Scan(&g.id, &g.matchCount, &g.userHits, &g.bestRank, &g.snippetRole, &g.snippet); err != nil {
+			return nil, 0, fmt.Errorf("reading a result of %q: %w", query, err)
 		}
-
-		sd, exists := sessions[sessionID]
-		if !exists {
-			sd = &sessionData{bestRank: rank, bestSnippetRank: 999}
-			sessions[sessionID] = sd
-			order = append(order, sessionID)
-		}
-		sd.matchCount++
-		if rank < sd.bestRank {
-			sd.bestRank = rank
-		}
-		if role == "user" {
-			sd.userHits++
-		}
-
-		// Prefer user messages for snippet, then best rank
-		isUser := role == "user"
-		if (isUser && !sd.bestSnippetUser) || (isUser == sd.bestSnippetUser && rank < sd.bestSnippetRank) {
-			sd.bestSnippet = snippet
-			sd.bestSnippetRole = role
-			sd.bestSnippetRank = rank
-			sd.bestSnippetUser = isUser
-		}
+		found = append(found, g)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("grouped search iteration error: %w", err)
+		return nil, 0, fmt.Errorf("reading the results of %q: %w", query, err)
 	}
 
-	// A database written only by upstream mnemo has no host column, and the
-	// callers that need one most, such as the MCP server, open the file
-	// read-only and so cannot add it. Ask once and select accordingly.
-	hostExpr := "''"
-	if sessionsRecordHost() {
-		hostExpr = "COALESCE(host, '')"
-	}
-	metaQuery := fmt.Sprintf(`
-		SELECT project, COALESCE(first_query, ''), message_count, tool,
-			   %s, COALESCE(working_directory, ''),
-			   COALESCE(start_time, indexed_at, '')
-		FROM sessions WHERE id = ?
-	`, hostExpr)
-
-	// Build SessionMatch results with session metadata
-	var matches []SessionMatch
-	for _, sid := range order {
-		sd := sessions[sid]
+	// Session metadata, one row each. A session that matched but whose row
+	// cannot be read is counted and reported: it used to be dropped in
+	// silence, so a database fault read as "nothing matched".
+	skipped := 0
+	matches := make([]SessionMatch, 0, len(found))
+	for _, g := range found {
 		sm := SessionMatch{
-			SessionID:   sid,
-			MatchCount:  sd.matchCount,
-			BestRank:    sd.bestRank,
-			Snippet:     sd.bestSnippet,
-			SnippetRole: sd.bestSnippetRole,
+			SessionID:   g.id,
+			MatchCount:  g.matchCount,
+			BestRank:    g.bestRank,
+			Snippet:     g.snippet,
+			SnippetRole: g.snippetRole,
 		}
 
-		// Fetch session metadata (scan time as string due to mixed timestamp formats)
-		var timeStr string
-		err := db.QueryRow(metaQuery, sid).
-			Scan(&sm.Project, &sm.FirstQuery, &sm.MessageCount, &sm.Tool, &sm.Host,
-				&sm.WorkingDirectory, &timeStr)
-		if err != nil {
+		if err := fillSessionMeta(&sm); err != nil {
+			log.Printf("mnemo: skipping session %s in results for %q: %v", g.id, query, err)
+			skipped++
 			continue
 		}
-		sm.StartTime = parseFlexibleTime(timeStr)
 
-		// Composite scoring: BM25 + density bonus + temporal decay + user-match bonus
-		var temporalDecay float64
-		if sm.StartTime.IsZero() {
-			temporalDecay = 0.5 // Neutral fallback for sessions without timestamps
-		} else {
-			daysOld := time.Since(sm.StartTime).Hours() / 24
-			daysOld = math.Max(0, daysOld) // Clamp: future timestamps treated as "today"
-			temporalDecay = math.Exp(-0.03 * daysOld)
-		}
-
-		// Cap density bonus to prevent high-activity sessions from dominating
-		densityBonus := math.Min(float64(sd.matchCount)*0.05, 1.0)
-		userBonus := math.Min(float64(sd.userHits)*0.1, 1.0)
-
-		// BM25 returns negative scores (more negative = better match).
-		// Subtracting positive bonuses makes score more negative (= better rank).
-		sm.FinalScore = (sd.bestRank - densityBonus - userBonus) * temporalDecay
-
+		sm.FinalScore = compositeScore(g.bestRank, g.matchCount, g.userHits, sm.StartTime)
 		matches = append(matches, sm)
 	}
 
-	// Sort by FinalScore ascending (more negative = more relevant)
-	for i := 1; i < len(matches); i++ {
-		for j := i; j > 0 && matches[j].FinalScore < matches[j-1].FinalScore; j-- {
-			matches[j], matches[j-1] = matches[j-1], matches[j]
-		}
-	}
-
+	sort.SliceStable(matches, func(i, j int) bool {
+		return matches[i].FinalScore < matches[j].FinalScore
+	})
 	if len(matches) > limit {
 		matches = matches[:limit]
 	}
 
-	return matches, nil
+	return matches, skipped, nil
+}
+
+// fillSessionMeta reads one session's own columns into a match.
+func fillSessionMeta(sm *SessionMatch) error {
+	hostExpr := "''"
+	if sessionsRecordHost() {
+		hostExpr = "COALESCE(host, '')"
+	}
+
+	var timeStr string
+	err := db.QueryRow(fmt.Sprintf(`
+		SELECT project, COALESCE(first_query, ''), message_count, tool,
+			   %s, COALESCE(working_directory, ''),
+			   COALESCE(start_time, indexed_at, '')
+		FROM sessions WHERE id = ?
+	`, hostExpr), sm.SessionID).
+		Scan(&sm.Project, &sm.FirstQuery, &sm.MessageCount, &sm.Tool, &sm.Host,
+			&sm.WorkingDirectory, &timeStr)
+	if err != nil {
+		return err
+	}
+
+	sm.StartTime = parseFlexibleTime(timeStr)
+	return nil
+}
+
+// compositeScore ranks a session: BM25, plus a bonus for matching often and
+// for matching what the person said rather than what a tool printed, decayed
+// by age. More negative is better, following BM25.
+func compositeScore(bestRank float64, matchCount, userHits int, start time.Time) float64 {
+	temporalDecay := 0.5 // a session with no start time is neither fresh nor stale
+	if !start.IsZero() {
+		daysOld := math.Max(0, time.Since(start).Hours()/24)
+		temporalDecay = math.Exp(-0.03 * daysOld)
+	}
+
+	densityBonus := math.Min(float64(matchCount)*0.05, 1.0)
+	userBonus := math.Min(float64(userHits)*0.1, 1.0)
+
+	return (bestRank - densityBonus - userBonus) * temporalDecay
 }
 
 // parseFlexibleTime handles multiple timestamp formats from the database.

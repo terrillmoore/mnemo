@@ -97,9 +97,13 @@ type searchResponse struct {
 	// TermsWithoutMatches holds the words that appear nowhere in the index,
 	// so a caller can drop them rather than guess which one spoiled the
 	// query. Empty unless matching every term found nothing.
-	TermsWithoutMatches []string     `json:"terms_without_matches"`
-	Count               int          `json:"count"`
-	Results             []sessionHit `json:"results"`
+	TermsWithoutMatches []string `json:"terms_without_matches"`
+	// Warnings names anything that makes this answer less than it should
+	// be, such as a session that matched but could not be read. Empty when
+	// the answer is whole.
+	Warnings []string     `json:"warnings"`
+	Count    int          `json:"count"`
+	Results  []sessionHit `json:"results"`
 }
 
 // contextResponse answers mnemo_context.

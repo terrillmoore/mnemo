@@ -140,11 +140,19 @@ func newMCPServer() *server.MCPServer {
 			missing = []string{}
 		}
 
+		warnings := []string{}
+		if found.SkippedSessions > 0 {
+			warnings = append(warnings, fmt.Sprintf(
+				"%d matching session(s) left out: their own row could not be read. The index may be damaged; the server log names them.",
+				found.SkippedSessions))
+		}
+
 		return mcp.NewToolResultJSON(searchResponse{
 			Query:               query,
 			Filters:             newSearchFilters(filter),
 			Mode:                string(found.Mode),
 			TermsWithoutMatches: missing,
+			Warnings:            warnings,
 			Count:               len(results),
 			Results:             newSessionHits(results),
 		})
