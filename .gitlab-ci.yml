@@ -74,9 +74,14 @@ build:linux-amd64:
   stage: build
   script:
     - VERSION="$(git describe --tags --always --dirty)"
-    - echo "VERSION=$VERSION" | tee build.env
     - GOOS=linux GOARCH=amd64 go build -trimpath -o mnemo .
+    # After the build: Go reads `git status` to stamp it, and every file
+    # this job writes into the working tree is one more chance to be told
+    # the tree is dirty.
+    - echo "VERSION=$VERSION" | tee build.env
     - ./mnemo version
+    # The stamp is the thing the archive host is asked to trust.
+    - ./mnemo version | grep -q -- -dirty && { echo "the build is stamped dirty; something in the working tree is untracked"; exit 1; } || true
     - sha256sum mnemo | tee mnemo.sha256
   artifacts:
     paths:

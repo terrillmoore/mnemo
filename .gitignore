@@ -19,6 +19,16 @@ coverage.html
 # Go workspace file
 go.work
 
+# What the GitLab pipeline leaves in the working tree: the module and build
+# caches it keeps between runs, and the build's own outputs. They have to be
+# ignored, not merely untracked: Go stamps a build from `git status`, so an
+# untracked file makes the binary say -dirty and the provenance of what the
+# archive host runs stops meaning anything.
+/.go/
+/.gocache/
+/mnemo.sha256
+/build.env
+
 # IDE
 .idea/
 .vscode/
